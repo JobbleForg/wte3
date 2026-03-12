@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import numpy as np
+import pyqtgraph as pg
+from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+from ...data_manager import TrendSeriesData, TrendSheetData
+
+
+PLOT_COLORS = (
+    "#6CB6FF",
+    "#F28F3B",
+    "#61D095",
+    "#E06C75",
+    "#C678DD",
+    "#E5C07B",
+)
+MIN_VISIBLE_SAMPLES = 800
+
+
+@dataclass(frozen=True)
+class TrendPlotSeries:
+    sheet: TrendSheetData
+    series: TrendSeriesData
+
+
+@dataclass(frozen=True)
+class TrendVisibleSeriesStats:
+    tag_name: str
+    sheet_name: str
+    color: str
+    sample_count: int
+    latest_value: float | None
+    minimum_value: float | None
+    maximum_value: float | None
+    average_value: float | None
+
+
+@dataclass
+class _PreparedTrendPlotSeries:
+    plotted: TrendPlotSeries
+    color: str
+    x_values: np.ndarray
+    y_values: np.ndarray
+    curve: object
+
+
+class TrendPlotWidget(QWidget):
+    """Phase-2 preview plot with visible-window slicing and downsampling."""
+
+    visibleRangeChanged = Signal(float, float)
+    visibleStatsChanged = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        self._summary_label = QLabel(self)
+        self._summary_label.setAlignment(Qt.AlignCenter)
+        self._summary_label.setWordWrap(True)
+        layout.addWidget(self._summary_label)
+
+        axis_items = {"bottom": pg.DateAxisItem(orientation="bottom")}
+        self._plot_widget = pg.PlotWidget(axisItems=axis_items, parent=self)
+        self._plot_widget.setBackground("#171D23")
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self._plot_widget.setMenuEnabled(False)
+        self._plot_widget.hideButtons()
+        self._plot_widget.setLabel("bottom", "Time")
+        self._plot_widget.setLabel("left", "Value")
+        self._legend_item = self._plot_widget.addLegend(offset=(12, 12))
+        if hasattr(self._legend_item, "setBrush"):
+            self._legend_item.setBrush(pg.mkBrush("#20262D"))
+        if hasattr(self._legend_item, "setPen"):
+            self._legend_item.setPen(pg.mkPen("#37414B"))
+        if hasattr(self._legend_item, "setLabelTextColor"):
+            self._legend_item.setLabelTextColor("#D8DFE6")
+        layout.addWidget(self._plot_widget, stretch=1)
+
+        self._current_workbook_name = ""
+        self._current_plotted_series: list[TrendPlotSeries] = []
+        self._prepared_series: list[_PreparedTrendPlotSeries] = []
+        self._pending_x_range: tuple[float, float] | None = None
+        self._suspend_range_updates = False
+
+        self._range_update_timer = QTimer(self)
+        self._range_update_timer.setSingleShot(True)
+        self._range_update_timer.setInterval(24)
+        self._range_update_timer.timeout.connect(self._apply_pending_range_update)
+
+        self._plot_widget.sigXRangeChanged.connect(self._handle_x_range_changed)
+
+        self.show_empty(
+            "No live trend data loaded.\nOpen a workbook to prepare sheets and tags for plotting."
+        )
+
+    def show_empty(self, message: str) -> None:
+        self._current_workbook_name = ""
+        self._current_plotted_series = []
+        self._prepared_series = []
+        self._pending_x_range = None
+        self._summary_label.setText(message)
+
+        plot_item = self._plot_widget.getPlotItem()
+        plot_item.clear()
+        plot_item.setTitle("")
+        plot_item.setLabel("left", "Value")
+        plot_item.setLabel("bottom", "Time")
+        if self._legend_item is not None:
+            self._legend_item.clear()
+
+        self.visibleStatsChanged.emit([])
+
+    def plot_series_group(
+        self,
+        *,
+        workbook_name: str,
+        plotted_series: list[TrendPlotSeries],
+    ) -> None:
+        plot_item = self._plot_widget.getPlotItem()
+        plot_item.clear()
+        if self._legend_item is not None:
+            self._legend_item.clear()
+
+        prepared_series: list[_PreparedTrendPlotSeries] = []
+        x_min_values: list[float] = []
+        x_max_values: list[float] = []
+
+        for index, plotted in enumerate(plotted_series):
+            x_values, y_values = plotted.series.plot_points(plotted.sheet.timestamps)
+            if not x_values:
+                continue
+
+            x_array = np.asarray(x_values, dtype=np.float64)
+            y_array = np.asarray(y_values, dtype=np.float64)
+            color = PLOT_COLORS[index % len(PLOT_COLORS)]
+            curve = self._plot_widget.plot(
+                [],
+                [],
+                pen=pg.mkPen(color, width=2),
+                connect="finite",
+                name=plotted.series.tag_name,
+            )
+            curve.setSkipFiniteCheck(True)
+
+            prepared_series.append(
+                _PreparedTrendPlotSeries(
+                    plotted=plotted,
+                    color=color,
+                    x_values=x_array,
+                    y_values=y_array,
+                    curve=curve,
+                )
+            )
+            x_min_values.append(float(x_array[0]))
+            x_max_values.append(float(x_array[-1]))
+
+        if not prepared_series:
+            tag_names = ", ".join(plotted.series.tag_name for plotted in plotted_series)
+            self.show_empty(
+                f"{workbook_name}\n{tag_names or 'Selected tags'}\n"
+                "No plottable numeric values were found."
+            )
+            return
+
+        title = (
+            prepared_series[0].plotted.series.tag_name
+            if len(prepared_series) == 1
+            else f"{len(prepared_series)} selected tags"
+        )
+        plot_item.setTitle(title)
+        plot_item.setLabel("left", "Value")
+        plot_item.setLabel("bottom", "Time")
+
+        self._current_workbook_name = workbook_name
+        self._current_plotted_series = [prepared.plotted for prepared in prepared_series]
+        self._prepared_series = prepared_series
+
+        x_min = min(x_min_values)
+        x_max = max(x_max_values)
+        self._suspend_range_updates = True
+        plot_item.setXRange(x_min, x_max, padding=0.02)
+        self._suspend_range_updates = False
+        self._update_visible_window(x_min, x_max)
+
+    def current_x_range(self) -> tuple[float, float]:
+        x_range = self._plot_widget.getPlotItem().viewRange()[0]
+        return float(x_range[0]), float(x_range[1])
+
+    def _handle_x_range_changed(self, _plot_widget, x_range) -> None:
+        if self._suspend_range_updates:
+            return
+
+        try:
+            x_min, x_max = float(x_range[0]), float(x_range[1])
+        except (TypeError, ValueError, IndexError):
+            return
+
+        if not self._prepared_series:
+            return
+
+        self._pending_x_range = (x_min, x_max)
+        self._range_update_timer.start()
+
+    def _apply_pending_range_update(self) -> None:
+        if self._pending_x_range is None:
+            return
+        x_min, x_max = self._pending_x_range
+        self._pending_x_range = None
+        self._update_visible_window(x_min, x_max)
+
+    def _update_visible_window(self, x_min: float, x_max: float) -> None:
+        if not self._prepared_series:
+            return
+
+        visible_stats: list[TrendVisibleSeriesStats] = []
+        y_min_values: list[float] = []
+        y_max_values: list[float] = []
+        target_points = max(MIN_VISIBLE_SAMPLES, int(self._plot_widget.width() * 1.5))
+
+        for prepared in self._prepared_series:
+            start_index, end_index = _visible_index_bounds(prepared.x_values, x_min, x_max)
+            visible_x = prepared.x_values[start_index:end_index]
+            visible_y = prepared.y_values[start_index:end_index]
+
+            if visible_x.size == 0:
+                prepared.curve.setData([], [])
+                visible_stats.append(
+                    TrendVisibleSeriesStats(
+                        tag_name=prepared.plotted.series.tag_name,
+                        sheet_name=prepared.plotted.sheet.name,
+                        color=prepared.color,
+                        sample_count=0,
+                        latest_value=None,
+                        minimum_value=None,
+                        maximum_value=None,
+                        average_value=None,
+                    )
+                )
+                continue
+
+            downsampled_x, downsampled_y = _downsample_visible_slice(
+                visible_x,
+                visible_y,
+                target_points,
+            )
+            prepared.curve.setData(downsampled_x, downsampled_y)
+
+            y_min_values.append(float(np.min(visible_y)))
+            y_max_values.append(float(np.max(visible_y)))
+            visible_stats.append(
+                TrendVisibleSeriesStats(
+                    tag_name=prepared.plotted.series.tag_name,
+                    sheet_name=prepared.plotted.sheet.name,
+                    color=prepared.color,
+                    sample_count=int(visible_y.size),
+                    latest_value=float(visible_y[-1]),
+                    minimum_value=float(np.min(visible_y)),
+                    maximum_value=float(np.max(visible_y)),
+                    average_value=float(np.mean(visible_y)),
+                )
+            )
+
+        self._apply_visible_y_range(y_min_values, y_max_values)
+        self._summary_label.setText(
+            _build_summary_text(
+                workbook_name=self._current_workbook_name,
+                visible_stats=visible_stats,
+                x_min=x_min,
+                x_max=x_max,
+            )
+        )
+        self.visibleRangeChanged.emit(x_min, x_max)
+        self.visibleStatsChanged.emit(visible_stats)
+
+    def _apply_visible_y_range(
+        self,
+        y_min_values: list[float],
+        y_max_values: list[float],
+    ) -> None:
+        if not y_min_values or not y_max_values:
+            return
+
+        y_min = min(y_min_values)
+        y_max = max(y_max_values)
+        if y_min == y_max:
+            padding = abs(y_min) * 0.05 or 1.0
+        else:
+            padding = (y_max - y_min) * 0.08
+
+        self._suspend_range_updates = True
+        self._plot_widget.getPlotItem().setYRange(
+            y_min - padding,
+            y_max + padding,
+            padding=0,
+        )
+        self._suspend_range_updates = False
+
+
+def _build_summary_text(
+    *,
+    workbook_name: str,
+    visible_stats: list[TrendVisibleSeriesStats],
+    x_min: float,
+    x_max: float,
+) -> str:
+    if not visible_stats:
+        return (
+            "No live trend data loaded.\n"
+            "Open a workbook to prepare sheets and tags for plotting."
+        )
+
+    sample_count = sum(stats.sample_count for stats in visible_stats)
+    time_range = _format_time_range(x_min, x_max)
+
+    if len(visible_stats) == 1:
+        stats = visible_stats[0]
+        return (
+            f"{workbook_name}\n"
+            f"Sheet: {stats.sheet_name} | Tag: {stats.tag_name}\n"
+            f"Visible samples: {stats.sample_count:,}\n"
+            f"Visible range: {time_range}"
+        )
+
+    sheet_names = sorted({stats.sheet_name for stats in visible_stats}, key=str.casefold)
+    tag_names = [stats.tag_name for stats in visible_stats]
+    return (
+        f"{workbook_name}\n"
+        f"Sheets: {', '.join(sheet_names)}\n"
+        f"Tags ({len(tag_names)}): {_summarize_tag_names(tag_names)}\n"
+        f"Visible samples: {sample_count:,}\n"
+        f"Visible range: {time_range}"
+    )
+
+
+def _summarize_tag_names(tag_names: list[str]) -> str:
+    if len(tag_names) <= 4:
+        return ", ".join(tag_names)
+    visible = ", ".join(tag_names[:4])
+    return f"{visible}, +{len(tag_names) - 4} more"
+
+
+def _format_time_range(start_epoch: float, end_epoch: float) -> str:
+    start = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    end = datetime.fromtimestamp(end_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{start} to {end}"
+
+
+def _visible_index_bounds(
+    x_values: np.ndarray,
+    x_min: float,
+    x_max: float,
+) -> tuple[int, int]:
+    start_index = max(0, int(np.searchsorted(x_values, x_min, side="left")) - 1)
+    end_index = min(x_values.size, int(np.searchsorted(x_values, x_max, side="right")) + 1)
+    return start_index, end_index
+
+
+def _downsample_visible_slice(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if x_values.size <= max_points:
+        return x_values, y_values
+
+    bucket_count = max(1, max_points // 2)
+    bucket_edges = np.linspace(0, x_values.size, bucket_count + 1, dtype=np.int64)
+    sampled_indices: list[int] = [0]
+
+    for bucket_index in range(bucket_count):
+        start_index = int(bucket_edges[bucket_index])
+        end_index = int(bucket_edges[bucket_index + 1])
+        if end_index - start_index <= 0:
+            continue
+
+        segment = y_values[start_index:end_index]
+        local_min_index = start_index + int(np.argmin(segment))
+        local_max_index = start_index + int(np.argmax(segment))
+
+        if local_min_index <= local_max_index:
+            sampled_indices.extend((local_min_index, local_max_index))
+        else:
+            sampled_indices.extend((local_max_index, local_min_index))
+
+    sampled_indices.append(x_values.size - 1)
+    unique_indices = np.unique(np.asarray(sampled_indices, dtype=np.int64))
+    return x_values[unique_indices], y_values[unique_indices]
