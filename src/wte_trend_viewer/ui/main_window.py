@@ -260,6 +260,8 @@ class TrendViewerMainWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         self._trend_plot_widget = TrendPlotWidget(viewport)
         self._trend_plot_widget.visibleStatsChanged.connect(self._handle_plot_visible_stats_changed)
+        self._trend_plot_widget.panFractionChanged.connect(self._handle_workspace_changed)
+        self._trend_plot_widget.legendStateChanged.connect(self._handle_workspace_changed)
 
         layout.addWidget(title)
         layout.addWidget(self._trend_plot_widget, stretch=1)
@@ -527,6 +529,19 @@ class TrendViewerMainWindow(QMainWindow):
 
             self.set_imported_tags(session.imported_tags, persist=False)
 
+            if self._trend_plot_widget is not None:
+                self._trend_plot_widget.set_pan_fraction(
+                    _coerce_positive_int(
+                        session.trend_state.get("pan_step_numerator"),
+                        default=1,
+                    ),
+                    _coerce_positive_int(
+                        session.trend_state.get("pan_step_denominator"),
+                        default=4,
+                    ),
+                )
+                self._trend_plot_widget.apply_legend_state(session.legend_state)
+
             ui_state = session.ui_state
             if self._left_workspace_splitter is not None:
                 sizes = ui_state.get("left_splitter_sizes")
@@ -624,13 +639,20 @@ class TrendViewerMainWindow(QMainWindow):
         else:
             trend_state.pop("preview_tag_names", None)
         trend_state.pop("preview_tag_name", None)
+        if self._trend_plot_widget is not None:
+            pan_numerator, pan_denominator = self._trend_plot_widget.pan_fraction()
+            trend_state["pan_step_numerator"] = pan_numerator
+            trend_state["pan_step_denominator"] = pan_denominator
+            legend_state = self._trend_plot_widget.legend_state()
+        else:
+            legend_state = dict(self._session.legend_state)
 
         return WorkspaceSession(
             version=self._session.version,
             hierarchy=self._snapshot_hierarchy(),
             imported_tags=self._imported_tags_list.tags(),
             trend_state=trend_state,
-            legend_state=dict(self._session.legend_state),
+            legend_state=legend_state,
             analytics_state=dict(self._session.analytics_state),
             settings_state=dict(self._session.settings_state),
             ui_state=ui_state,
@@ -901,3 +923,11 @@ def _format_numeric(value: float | None) -> str:
     if abs(value) >= 1:
         return f"{value:,.3f}"
     return f"{value:,.4f}"
+
+
+def _coerce_positive_int(value: object, *, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return coerced if coerced > 0 else default
