@@ -732,13 +732,11 @@ class TrendViewerMainWindow(QMainWindow):
     def _handle_hierarchy_selection_changed(self) -> None:
         self._sync_subcategory_button_state()
 
-        current_item = self._hierarchy_tree.currentItem()
-        if current_item is None:
-            return
-        if current_item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+        selected_tag_names = self._hierarchy_tree.selected_tag_names()
+        if not selected_tag_names:
             return
 
-        self._preview_tags([current_item.text(0)], persist_selection=True)
+        self._preview_tags(selected_tag_names, persist_selection=True)
 
     def _preview_tags(self, tag_names: list[str], *, persist_selection: bool) -> bool:
         if self._loaded_workbook is None or self._trend_plot_widget is None:

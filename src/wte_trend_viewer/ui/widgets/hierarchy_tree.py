@@ -26,7 +26,7 @@ class SearchableHierarchyTree(QTreeWidget):
         super().__init__(parent)
         self.setHeaderHidden(True)
         self.setAlternatingRowColors(True)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
@@ -110,6 +110,13 @@ class SearchableHierarchyTree(QTreeWidget):
         if current.data(0, ITEM_KIND_ROLE) == GROUP_ITEM_KIND:
             return current
         return current.parent()
+
+    def selected_tag_names(self) -> list[str]:
+        return [
+            item.text(0)
+            for item in self.selectedItems()
+            if item.data(0, ITEM_KIND_ROLE) == TAG_ITEM_KIND
+        ]
 
     def remove_selected_item(self) -> bool:
         item = self.currentItem()
