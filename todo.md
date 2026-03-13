@@ -123,9 +123,9 @@ Verification:
 ### Phase 4: replace the Y axis presentation
 
 Status:
-- partially completed on `main`
-- first-pass left-side grouped labels are implemented
-- remaining work is layout polish and making the presentation closer to the reference screen
+- completed for the current shared-range design on `main`
+- left-side grouped labels are implemented with compact column stacking
+- panel width is now derived from the rendered label widths instead of a wide fixed estimate
 
 Goal:
 - match the work-style left-side labeling model instead of separate per-series axes
@@ -150,13 +150,14 @@ Verification:
 - colors match the plotted tags
 - adding/removing tags updates the label clusters correctly
 - label layout remains readable with several plotted tags
+- the scale panel now stays narrow for small tag counts and expands only as needed
 
 ### Phase 5: constrain plot interaction to X only
 
 Status:
-- partially completed on `main`
-- view-box mouse movement is now X-only
-- remaining work is final interaction verification and any wheel/zoom polish needed after manual testing
+- completed on `main`
+- view-box mouse movement is X-only
+- explicit scale and translate operations now keep the Y range fixed as well
 
 Goal:
 - mouse drag only pans in time
@@ -171,11 +172,13 @@ Verification:
 - drag does not shift the curves vertically
 - panning still feels smooth
 - cursor inspection still tracks correctly after pan/zoom
+- direct view-box scale/translate calls were verified to keep Y locked to `0..100`
 
 ### Phase 6: final cleanup and verification
 
 Run:
 - `.\.venv\Scripts\python.exe -m compileall src`
+- `.\.venv\Scripts\python.exe -m pytest`
 - `.\.venv\Scripts\python.exe -m wte_trend_viewer`
 
 Manual smoke test:
@@ -188,25 +191,32 @@ Manual smoke test:
 7. Hover the cursor and confirm analytics still show raw previous / nearest / interpolated / next values.
 8. Close and reopen the app and confirm the tag ranges restore.
 9. Confirm no floating legend window appears anywhere.
+10. Confirm time-range Apply still restores the same visible X window after session reload.
 
-## Current code changes not yet committed
+Automated verification already completed on `main`:
+- `.\.venv\Scripts\python.exe -m compileall src`
+- `.\.venv\Scripts\python.exe -m pytest`
+- offscreen workbook smoke with `sample-data.xlsx`
 
-The worktree currently contains the cursor analytics expansion beyond the earlier cursor commit:
-- previous raw sample value
-- nearest raw sample value
-- interpolated cursor value
-- next raw sample value
-- analytics table tooltips with timestamps / interpolation source
+Smoke checks already confirmed:
+- Y remains locked at `0..100` during explicit scale and translate calls
+- display range edits still remap plotted series
+- a 6-hour applied time window restores correctly after session capture/restore
+- cursor analytics still populate with raw values
+- the visible range badge and cursor label still update as expected
 
-Primary modified files:
+Most recent stabilization files:
+- `src/wte_trend_viewer/data_manager.py`
 - `src/wte_trend_viewer/ui/main_window.py`
 - `src/wte_trend_viewer/ui/widgets/trend_plot_widget.py`
+- `tests/test_data_manager.py`
+- `tests/test_trend_plot_widget.py`
 
 ## Suggested next starting point
 
-Start in:
-- `src/wte_trend_viewer/ui/widgets/trend_plot_widget.py`
-- `src/wte_trend_viewer/ui/main_window.py`
+The next work is no longer core plotting infrastructure.
 
-First coding target:
-- polish the left shared-scale label presentation and verify the remaining X-only interaction behavior manually
+Suggested focus:
+- manual visual QA in the full desktop app
+- decide whether the compact shared-scale panel needs more presentation polish
+- then move to the next user-requested feature instead of more internal plotting rewrites

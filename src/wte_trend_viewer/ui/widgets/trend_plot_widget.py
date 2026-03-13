@@ -7,11 +7,12 @@ from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QDateTime, QEvent, QSignalBlocker, QTimer, Qt, Signal
+from PySide6.QtCore import QDateTime, QEvent, QSignalBlocker, QTimer, Qt, Signal, QTimeZone
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QDateTimeEdit,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -37,7 +38,7 @@ PLOT_COLORS = (
 MIN_VISIBLE_SAMPLES = 800
 DISPLAY_Y_MIN = 0.0
 DISPLAY_Y_MAX = 100.0
-SCALE_PANEL_COLUMN_WIDTH = 68
+SCALE_PANEL_COLUMN_PADDING = 10
 SCALE_PANEL_COLUMN_SPACING = 6
 SCALE_PANEL_MIN_WIDTH = 92
 SCALE_PANEL_TAGS_PER_COLUMN = 5
@@ -109,6 +110,55 @@ class _PreparedTrendPlotSeries:
     curve: object
 
 
+class _TrendViewBox(pg.ViewBox):
+    """ViewBox that keeps the trend plot vertically fixed while allowing X navigation."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._fixed_y_range: tuple[float, float] | None = None
+
+    def set_fixed_y_range(self, y_min: float, y_max: float) -> None:
+        if not np.isfinite(y_min) or not np.isfinite(y_max):
+            return
+        if y_min >= y_max:
+            padding = abs(y_min) * 0.05 or 1.0
+            y_min -= padding
+            y_max += padding
+
+        self._fixed_y_range = (float(y_min), float(y_max))
+        fixed_height = float(y_max - y_min)
+        self.setLimits(
+            yMin=float(y_min),
+            yMax=float(y_max),
+            minYRange=fixed_height,
+            maxYRange=fixed_height,
+        )
+        super().setYRange(float(y_min), float(y_max), padding=0)
+
+    def scaleBy(self, s=None, center=None, x=None, y=None):
+        if self._fixed_y_range is not None:
+            if s is not None:
+                x = s[0]
+            super().scaleBy(center=center, x=x, y=None)
+            self._enforce_fixed_y_range()
+            return
+        super().scaleBy(s=s, center=center, x=x, y=y)
+
+    def translateBy(self, t=None, x=None, y=None):
+        if self._fixed_y_range is not None:
+            if t is not None:
+                x = pg.Point(t).x()
+            super().translateBy(x=x, y=None)
+            self._enforce_fixed_y_range()
+            return
+        super().translateBy(t=t, x=x, y=y)
+
+    def _enforce_fixed_y_range(self) -> None:
+        if self._fixed_y_range is None:
+            return
+        super().setYRange(*self._fixed_y_range, padding=0)
+
+
 class TrendPlotWidget(QWidget):
     """Phase-2 preview plot with visible-window slicing and downsampling."""
 
@@ -130,11 +180,6 @@ class TrendPlotWidget(QWidget):
         self._summary_label.setWordWrap(True)
         self._summary_label.hide()
         layout.addWidget(self._summary_label)
-
-        self._cursor_label = QLabel(self)
-        self._cursor_label.setAlignment(Qt.AlignCenter)
-        self._cursor_label.hide()
-        layout.addWidget(self._cursor_label)
 
         plot_row = QWidget(self)
         plot_row_layout = QHBoxLayout(plot_row)
@@ -171,13 +216,19 @@ class TrendPlotWidget(QWidget):
         plot_row_layout.addWidget(self._shared_scale_panel)
 
         axis_items = {"bottom": pg.DateAxisItem(orientation="bottom")}
-        self._plot_widget = pg.PlotWidget(axisItems=axis_items, parent=self)
+        self._plot_view_box = _TrendViewBox(enableMenu=False)
+        self._plot_widget = pg.PlotWidget(
+            axisItems=axis_items,
+            viewBox=self._plot_view_box,
+            parent=self,
+        )
         self._plot_widget.setBackground("#171D23")
         self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self._plot_widget.setMenuEnabled(False)
         self._plot_widget.hideButtons()
-        self._plot_widget.getViewBox().setMouseMode(pg.ViewBox.PanMode)
-        self._plot_widget.getViewBox().setMouseEnabled(x=True, y=False)
+        self._plot_view_box.setMouseMode(pg.ViewBox.PanMode)
+        self._plot_view_box.setMouseEnabled(x=True, y=False)
+        self._plot_view_box.set_fixed_y_range(DISPLAY_Y_MIN, DISPLAY_Y_MAX)
         self._plot_widget.setLabel("bottom", "Time")
         plot_row_layout.addWidget(self._plot_widget, stretch=1)
         layout.addWidget(plot_row, stretch=1)
@@ -238,6 +289,14 @@ class TrendPlotWidget(QWidget):
         self._visible_range_label.setMaximumWidth(312)
         self._visible_range_label.hide()
         layout.addWidget(self._visible_range_label)
+
+        layout.addStretch(1)
+
+        self._cursor_label = QLabel(container)
+        self._cursor_label.setAlignment(Qt.AlignCenter)
+        self._cursor_label.setMinimumWidth(260)
+        self._cursor_label.hide()
+        layout.addWidget(self._cursor_label, stretch=1)
 
         layout.addStretch(1)
 
@@ -317,7 +376,7 @@ class TrendPlotWidget(QWidget):
     def _configure_datetime_edit(self, control: QDateTimeEdit) -> None:
         control.setCalendarPopup(True)
         control.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-        control.setTimeSpec(Qt.LocalTime)
+        control.setTimeZone(QTimeZone.systemTimeZone())
 
     def pan_fraction(self) -> tuple[int, int]:
         return self._pan_numerator_spin.value(), self._pan_denominator_spin.value()
@@ -636,15 +695,8 @@ class TrendPlotWidget(QWidget):
         self._update_visible_window(x_min, x_max, preserved_y_range=preserved_y_range)
 
     def _set_y_range(self, y_min: float, y_max: float) -> None:
-        if not np.isfinite(y_min) or not np.isfinite(y_max):
-            return
-        if y_min >= y_max:
-            padding = abs(y_min) * 0.05 or 1.0
-            y_min -= padding
-            y_max += padding
-
         self._suspend_range_updates = True
-        self._plot_widget.getPlotItem().setYRange(y_min, y_max, padding=0)
+        self._plot_view_box.set_fixed_y_range(y_min, y_max)
         self._suspend_range_updates = False
 
     def _set_navigation_enabled(self, enabled: bool) -> None:
@@ -831,10 +883,14 @@ class TrendPlotWidget(QWidget):
             return
 
         column_count = _shared_scale_column_count(len(prepared_series))
-        self._shared_scale_panel.setFixedWidth(_shared_scale_panel_width(column_count))
-        _configure_scale_grid(self._shared_scale_top_layout, column_count)
-        _configure_scale_grid(self._shared_scale_mid_layout, column_count)
-        _configure_scale_grid(self._shared_scale_bottom_layout, column_count)
+        column_widths = _shared_scale_column_widths(
+            prepared_series,
+            self._shared_scale_panel.fontMetrics(),
+        )
+        self._shared_scale_panel.setFixedWidth(_shared_scale_panel_width(column_widths))
+        _configure_scale_grid(self._shared_scale_top_layout, column_widths)
+        _configure_scale_grid(self._shared_scale_mid_layout, column_widths)
+        _configure_scale_grid(self._shared_scale_bottom_layout, column_widths)
 
         for index, prepared in enumerate(prepared_series):
             row_index = index % SCALE_PANEL_TAGS_PER_COLUMN
@@ -875,6 +931,7 @@ class TrendPlotWidget(QWidget):
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         label.setStyleSheet(f"color: {color};")
         label.setToolTip(tooltip)
+        label.setFrameStyle(QFrame.NoFrame)
         return label
 
     def _handle_scene_mouse_moved(self, scene_position: object) -> None:
@@ -1048,13 +1105,36 @@ def _clear_layout(layout) -> None:
             widget.deleteLater()
 
 
-def _configure_scale_grid(layout: QGridLayout, column_count: int) -> None:
+def _configure_scale_grid(layout: QGridLayout, column_widths: list[int]) -> None:
+    column_count = len(column_widths)
     layout.setHorizontalSpacing(SCALE_PANEL_COLUMN_SPACING if column_count > 1 else 2)
     layout.setVerticalSpacing(2)
     for column_index in range(SCALE_PANEL_STRETCH_RESET_COLUMNS):
         layout.setColumnStretch(column_index, 0)
+        layout.setColumnMinimumWidth(column_index, 0)
     for column_index in range(column_count):
-        layout.setColumnStretch(column_index, 1)
+        layout.setColumnMinimumWidth(column_index, column_widths[column_index])
+
+
+def _shared_scale_column_widths(
+    prepared_series: list[_PreparedTrendPlotSeries],
+    font_metrics,
+) -> list[int]:
+    column_count = _shared_scale_column_count(len(prepared_series))
+    widths: list[int] = [0] * column_count
+
+    for index, prepared in enumerate(prepared_series):
+        column_index = index // SCALE_PANEL_TAGS_PER_COLUMN
+        midpoint = (prepared.display_low_range + prepared.display_high_range) / 2.0
+        column_values = (
+            _format_scale_value(prepared.display_high_range),
+            _format_scale_value(midpoint),
+            _format_scale_value(prepared.display_low_range),
+        )
+        widest_value = max(font_metrics.horizontalAdvance(text) for text in column_values)
+        widths[column_index] = max(widths[column_index], widest_value + SCALE_PANEL_COLUMN_PADDING)
+
+    return [max(SCALE_PANEL_MIN_WIDTH if column_count == 1 else 0, width) for width in widths]
 
 
 def _shared_scale_column_count(series_count: int) -> int:
@@ -1063,10 +1143,11 @@ def _shared_scale_column_count(series_count: int) -> int:
     return max(1, (series_count + SCALE_PANEL_TAGS_PER_COLUMN - 1) // SCALE_PANEL_TAGS_PER_COLUMN)
 
 
-def _shared_scale_panel_width(column_count: int) -> int:
+def _shared_scale_panel_width(column_widths: list[int]) -> int:
+    column_count = len(column_widths)
     return max(
         SCALE_PANEL_MIN_WIDTH,
-        (column_count * SCALE_PANEL_COLUMN_WIDTH)
+        sum(column_widths)
         + (max(0, column_count - 1) * SCALE_PANEL_COLUMN_SPACING),
     )
 
@@ -1364,7 +1445,10 @@ def _matching_duration_preset(duration_seconds: int | None, presets: list[str]) 
 
 
 def _qdatetime_from_epoch(timestamp: float) -> QDateTime:
-    return QDateTime.fromSecsSinceEpoch(int(round(timestamp)), Qt.LocalTime)
+    return QDateTime.fromSecsSinceEpoch(
+        int(round(timestamp)),
+        QTimeZone.systemTimeZone(),
+    )
 
 
 def _coerce_epoch(value: object) -> float | None:

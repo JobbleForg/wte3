@@ -64,6 +64,27 @@ def test_widget_emits_cursor_stats_for_nearest_sample_and_interpolation(qapp) ->
     assert series_stats.interpolated_value == pytest.approx(14.6)
 
 
+def test_widget_keeps_y_range_fixed_during_scale_and_translate(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted = _make_plot_series()
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=[plotted])
+
+    initial_y_range = widget.current_y_range()
+    view_box = widget._plot_widget.getViewBox()
+    view_box.scaleBy(x=0.5, y=0.25)
+    assert widget.current_y_range() == initial_y_range
+
+    view_box.translateBy(x=120.0, y=50.0)
+    assert widget.current_y_range() == initial_y_range
+
+
+def test_cursor_label_is_in_navigation_row(qapp) -> None:
+    widget = TrendPlotWidget()
+
+    assert widget._cursor_label.parent() is widget._visible_range_label.parent()
+    assert widget._cursor_label.parent() is not widget
+
+
 def test_summary_text_includes_empty_state_message() -> None:
     text = _build_summary_text(
         workbook_name="Workbook",
