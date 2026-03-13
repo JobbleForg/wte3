@@ -15,7 +15,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...tag_units import normalize_unit_list, normalize_unit_text
+from ...tag_units import display_unit_text, normalize_unit_list, normalize_unit_text
+
+
+UNIT_VALUE_ROLE = Qt.UserRole + 1
 
 
 class UnitManagerDialog(QDialog):
@@ -35,6 +38,7 @@ class UnitManagerDialog(QDialog):
         description = QLabel(
             (
                 "Units added here appear in the tag right-click Assign unit menu. "
+                "Type the unit without brackets. The UI shows units as [unit]. "
                 "Deleting a unit clears it from any assigned tags when you apply changes."
             ),
             self,
@@ -76,9 +80,9 @@ class UnitManagerDialog(QDialog):
 
     def units(self) -> list[str]:
         return [
-            self._unit_list.item(index).text().strip()
+            self._unit_value(self._unit_list.item(index))
             for index in range(self._unit_list.count())
-            if self._unit_list.item(index).text().strip()
+            if self._unit_value(self._unit_list.item(index)) is not None
         ]
 
     def renamed_units(self) -> dict[str, str]:
@@ -86,7 +90,7 @@ class UnitManagerDialog(QDialog):
         for index in range(self._unit_list.count()):
             item = self._unit_list.item(index)
             original_value = item.data(Qt.UserRole)
-            current_value = item.text().strip()
+            current_value = self._unit_value(item)
             if (
                 isinstance(original_value, str)
                 and original_value.strip()
@@ -123,15 +127,16 @@ class UnitManagerDialog(QDialog):
     def _populate_units(self, units: list[str]) -> None:
         self._unit_list.clear()
         for unit in units:
-            item = QListWidgetItem(unit)
+            item = QListWidgetItem(display_unit_text(unit) or unit)
             item.setData(Qt.UserRole, unit)
+            item.setData(UNIT_VALUE_ROLE, unit)
             self._unit_list.addItem(item)
 
     def _add_unit(self) -> None:
         value, accepted = QInputDialog.getText(
             self,
             "Add Unit",
-            "Unit (for example [m3/hr] or [C]):",
+            "Unit (for example m^3/hr or C):",
         )
         if not accepted:
             return
@@ -141,11 +146,16 @@ class UnitManagerDialog(QDialog):
             QMessageBox.warning(self, "Invalid Unit", "Enter a non-empty unit.")
             return
         if self._has_unit(unit):
-            QMessageBox.warning(self, "Duplicate Unit", f"{unit} already exists.")
+            QMessageBox.warning(
+                self,
+                "Duplicate Unit",
+                f"{display_unit_text(unit) or unit} already exists.",
+            )
             return
 
-        item = QListWidgetItem(unit)
+        item = QListWidgetItem(display_unit_text(unit) or unit)
         item.setData(Qt.UserRole, None)
+        item.setData(UNIT_VALUE_ROLE, unit)
         self._unit_list.addItem(item)
         self._unit_list.setCurrentItem(item)
 
@@ -155,7 +165,7 @@ class UnitManagerDialog(QDialog):
             QMessageBox.warning(self, "No Unit Selected", "Select a unit to edit.")
             return
 
-        current_text = current_item.text().strip()
+        current_text = self._unit_value(current_item) or ""
         value, accepted = QInputDialog.getText(
             self,
             "Edit Unit",
@@ -170,10 +180,15 @@ class UnitManagerDialog(QDialog):
             QMessageBox.warning(self, "Invalid Unit", "Enter a non-empty unit.")
             return
         if unit.casefold() != current_text.casefold() and self._has_unit(unit):
-            QMessageBox.warning(self, "Duplicate Unit", f"{unit} already exists.")
+            QMessageBox.warning(
+                self,
+                "Duplicate Unit",
+                f"{display_unit_text(unit) or unit} already exists.",
+            )
             return
 
-        current_item.setText(unit)
+        current_item.setText(display_unit_text(unit) or unit)
+        current_item.setData(UNIT_VALUE_ROLE, unit)
 
     def _delete_selected_unit(self) -> None:
         current_row = self._unit_list.currentRow()
@@ -186,6 +201,12 @@ class UnitManagerDialog(QDialog):
         target = unit.casefold()
         for index in range(self._unit_list.count()):
             item = self._unit_list.item(index)
-            if item.text().strip().casefold() == target:
+            if (self._unit_value(item) or "").casefold() == target:
                 return True
         return False
+
+    def _unit_value(self, item: QListWidgetItem | None) -> str | None:
+        if item is None:
+            return None
+        value = item.data(UNIT_VALUE_ROLE)
+        return normalize_unit_text(value)

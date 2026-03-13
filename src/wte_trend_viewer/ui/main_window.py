@@ -5,9 +5,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, Qt
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QDockWidget,
     QFileDialog,
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..data_manager import LoadedTrendWorkbook, TrendDataManager
 from ..session import SessionStore, SessionTreeNode, WorkspaceSession
-from ..tag_units import normalize_unit_list, normalize_unit_text
+from ..tag_units import display_unit_text, normalize_unit_list, normalize_unit_text
 from ..workbook import WorkbookInspector
 from .dialogs.sheet_selection_dialog import SheetSelectionDialog
 from .dialogs.unit_manager_dialog import UnitManagerDialog
@@ -56,6 +57,14 @@ from .widgets.trend_plot_widget import (
     normalize_duration_presets,
     parse_duration_text,
 )
+
+LEGEND_TAG_COLUMN = 0
+LEGEND_SHEET_COLUMN = 1
+LEGEND_UNIT_COLUMN = 2
+LEGEND_LOW_RANGE_COLUMN = 3
+LEGEND_HIGH_RANGE_COLUMN = 4
+LEGEND_COLOR_COLUMN = 5
+LEGEND_HIGHLIGHT_COLUMN = 6
 
 
 class TrendViewerMainWindow(QMainWindow):
@@ -88,10 +97,8 @@ class TrendViewerMainWindow(QMainWindow):
         self._hierarchy_tree.itemSelectionChanged.connect(self._handle_hierarchy_selection_changed)
         self._hierarchy_tree.structureChanged.connect(self._handle_workspace_changed)
         self._hierarchy_tree.structureChanged.connect(self._refresh_tag_unit_presentations)
-        self._hierarchy_tree.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
-        self._hierarchy_tree.viewport().customContextMenuRequested.connect(
-            self._show_hierarchy_tag_context_menu
-        )
+        self._hierarchy_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._hierarchy_tree.customContextMenuRequested.connect(self._show_hierarchy_tag_context_menu)
 
         self._imported_tags_list = SearchableImportedTagList(self)
         self._imported_tags_list.tagsChanged.connect(self._handle_workspace_changed)
@@ -99,8 +106,8 @@ class TrendViewerMainWindow(QMainWindow):
         self._imported_tags_list.itemSelectionChanged.connect(
             self._handle_imported_tag_selection_changed
         )
-        self._imported_tags_list.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
-        self._imported_tags_list.viewport().customContextMenuRequested.connect(
+        self._imported_tags_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._imported_tags_list.customContextMenuRequested.connect(
             self._show_imported_tag_context_menu
         )
 
@@ -117,6 +124,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._time_preset_list: QListWidget | None = None
         self._analytics_table: QTableWidget | None = None
         self._current_plotted_series: list[TrendPlotSeries] = []
+        self._current_plot_colors_by_tag: dict[str, str] = {}
         self._current_visible_stats: list[TrendVisibleSeriesStats] = []
         self._current_cursor_stats: TrendCursorStats | None = None
         self._current_preview_tag_names: list[str] = []
@@ -307,8 +315,8 @@ class TrendViewerMainWindow(QMainWindow):
     def _build_bottom_workspace(self) -> QWidget:
         self._bottom_tabs = QTabWidget(self)
         self._bottom_tabs.addTab(self._build_legend_tab(), "Legend")
-        self._bottom_tabs.addTab(self._build_settings_tab(), "Settings")
         self._bottom_tabs.addTab(self._build_analytics_tab(), "Analytics")
+        self._bottom_tabs.addTab(self._build_settings_tab(), "Settings")
         self._bottom_tabs.currentChanged.connect(self._handle_workspace_changed)
         return self._bottom_tabs
 
@@ -317,15 +325,18 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._legend_table = QTableWidget(0, 5, container)
+        self._legend_table = QTableWidget(0, 7, container)
         self._legend_table.setHorizontalHeaderLabels(
-            ["Tag", "Sheet", "Unit", "Low Range", "High Range"]
+            ["Tag", "Sheet", "Unit", "Low Range", "High Range", "Color", "Highlight"]
         )
         self._legend_table.verticalHeader().setVisible(False)
         self._legend_table.setAlternatingRowColors(True)
         self._legend_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._legend_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._legend_table.itemChanged.connect(self._handle_legend_table_item_changed)
+        header = self._legend_table.horizontalHeader()
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self._show_legend_header_context_menu)
 
         layout.addWidget(self._legend_table)
         return container
@@ -651,7 +662,9 @@ class TrendViewerMainWindow(QMainWindow):
     def _show_imported_tag_context_menu(self, position) -> None:
         item = self._imported_tags_list.itemAt(position)
         if item is None:
-            return
+            item = self._imported_tags_list.currentItem()
+            if item is None:
+                return
 
         clicked_tag_name = self._imported_tags_list.tag_name_for_item(item)
         if clicked_tag_name is None:
@@ -670,7 +683,11 @@ class TrendViewerMainWindow(QMainWindow):
 
     def _show_hierarchy_tag_context_menu(self, position) -> None:
         item = self._hierarchy_tree.itemAt(position)
-        if item is None or item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+        if item is None:
+            item = self._hierarchy_tree.currentItem()
+            if item is None:
+                return
+        if item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
             return
 
         clicked_tag_name = self._hierarchy_tree.tag_name(item)
@@ -749,7 +766,9 @@ class TrendViewerMainWindow(QMainWindow):
                 persist=True,
             )
             self.statusBar().showMessage(
-                f"Assigned {selected_unit} to {len(normalized_unit_target_tag_names)} tag(s).",
+                "Assigned "
+                f"{display_unit_text(selected_unit) or selected_unit} "
+                f"to {len(normalized_unit_target_tag_names)} tag(s).",
                 3000,
             )
 
@@ -775,7 +794,7 @@ class TrendViewerMainWindow(QMainWindow):
 
         unit_actions: dict[object, str] = {}
         for unit in available_units:
-            action = menu.addAction(unit)
+            action = menu.addAction(display_unit_text(unit) or unit)
             action.setCheckable(True)
             action.setChecked(unit == common_unit)
             unit_actions[action] = unit
@@ -807,7 +826,7 @@ class TrendViewerMainWindow(QMainWindow):
         value, accepted = QInputDialog.getText(
             self,
             "Add Unit",
-            "Unit (for example [m3/hr] or [C]):",
+            "Unit (for example m^3/hr or C):",
         )
         if not accepted:
             return
@@ -819,7 +838,7 @@ class TrendViewerMainWindow(QMainWindow):
 
         self._assign_unit_to_tags(tag_names, unit, persist=True)
         self.statusBar().showMessage(
-            f"Assigned {unit} to {len(tag_names)} tag(s).",
+            f"Assigned {display_unit_text(unit) or unit} to {len(tag_names)} tag(s).",
             3000,
         )
 
@@ -1231,6 +1250,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._trend_data_manager.clear()
         self._loaded_workbook = None
         self._current_plotted_series = []
+        self._current_plot_colors_by_tag = {}
         self._current_visible_stats = []
         self._current_cursor_stats = None
         self._current_preview_tag_names = []
@@ -1241,6 +1261,7 @@ class TrendViewerMainWindow(QMainWindow):
             return
 
         if self._loaded_workbook is None:
+            self._current_plot_colors_by_tag = {}
             self._trend_plot_widget.show_empty(
                 "No live trend data loaded.\n"
                 "Open a workbook to prepare sheets and tags for plotting."
@@ -1248,6 +1269,7 @@ class TrendViewerMainWindow(QMainWindow):
             self._update_plot_support_panels([])
             return
 
+        self._current_plot_colors_by_tag = {}
         self._trend_plot_widget.show_empty(
             "Select one or more imported tags to preview the loaded trends."
         )
@@ -1257,6 +1279,7 @@ class TrendViewerMainWindow(QMainWindow):
         selected_tag_names = self._selected_imported_tag_names()
         if not selected_tag_names:
             self._current_plotted_series = []
+            self._current_plot_colors_by_tag = {}
             self._current_visible_stats = []
             self._current_cursor_stats = None
             self._current_preview_tag_names = []
@@ -1278,6 +1301,7 @@ class TrendViewerMainWindow(QMainWindow):
     def _preview_tags(self, tag_names: list[str], *, persist_selection: bool) -> bool:
         if self._loaded_workbook is None or self._trend_plot_widget is None:
             self._current_plotted_series = []
+            self._current_plot_colors_by_tag = {}
             self._current_visible_stats = []
             self._current_cursor_stats = None
             self._current_preview_tag_names = []
@@ -1299,6 +1323,7 @@ class TrendViewerMainWindow(QMainWindow):
 
         if not plotted_series:
             self._current_plotted_series = []
+            self._current_plot_colors_by_tag = {}
             self._current_visible_stats = []
             self._current_cursor_stats = None
             self._current_preview_tag_names = []
@@ -1309,6 +1334,7 @@ class TrendViewerMainWindow(QMainWindow):
             plotted.series.tag_name for plotted in plotted_series
         ]
         self._current_plotted_series = list(plotted_series)
+        self._current_plot_colors_by_tag = self._resolved_plot_colors(plotted_series)
         display_ranges_by_tag = {
             plotted.series.tag_name: self._resolved_display_range(plotted)
             for plotted in plotted_series
@@ -1325,7 +1351,9 @@ class TrendViewerMainWindow(QMainWindow):
             plotted_series=plotted_series,
             display_ranges_by_tag=display_ranges_by_tag,
             display_labels_by_tag=display_labels_by_tag,
+            series_colors_by_tag=self._current_plot_colors_by_tag,
         )
+        self._trend_plot_widget.set_highlighted_tags(self._active_highlighted_tag_names())
         self._update_plot_support_panels(plotted_series)
         if persist_selection:
             self._handle_workspace_changed()
@@ -1377,6 +1405,116 @@ class TrendViewerMainWindow(QMainWindow):
         if isinstance(legacy_value, str) and legacy_value.strip():
             return [legacy_value.strip()]
         return []
+
+    def _stored_highlighted_tag_names(self) -> list[str]:
+        value = self._session.trend_state.get("highlighted_tag_names")
+        if isinstance(value, list):
+            return _normalize_tag_names([str(item) for item in value])
+        return []
+
+    def _stored_tag_colors_state(self) -> dict[str, object]:
+        colors = self._session.trend_state.get("tag_colors")
+        if isinstance(colors, dict):
+            return colors
+        colors = {}
+        self._session.trend_state["tag_colors"] = colors
+        return colors
+
+    def _stored_color_for_tag(self, tag_name: str) -> str | None:
+        value = self._stored_tag_colors_state().get(tag_name)
+        return _normalize_plot_color(value)
+
+    def _resolved_plot_colors(self, plotted_series: list[TrendPlotSeries]) -> dict[str, str]:
+        resolved_colors: dict[str, str] = {}
+        used_colors: set[str] = set()
+
+        for plotted in plotted_series:
+            stored_color = self._stored_color_for_tag(plotted.series.tag_name)
+            if stored_color is None or stored_color in used_colors:
+                continue
+            resolved_colors[plotted.series.tag_name] = stored_color
+            used_colors.add(stored_color)
+
+        for index, plotted in enumerate(plotted_series):
+            tag_name = plotted.series.tag_name
+            if tag_name in resolved_colors:
+                continue
+
+            available_color = next(
+                (color for color in PLOT_COLORS if color not in used_colors),
+                None,
+            )
+            if available_color is None:
+                available_color = PLOT_COLORS[index % len(PLOT_COLORS)]
+            resolved_colors[tag_name] = available_color
+            used_colors.add(available_color)
+
+        return resolved_colors
+
+    def _set_plot_color_for_tag(self, tag_name: str, color: str, *, persist: bool) -> None:
+        normalized_tag_name = tag_name.strip()
+        normalized_color = _normalize_plot_color(color)
+        if not normalized_tag_name or normalized_color is None:
+            return
+
+        current_colors = self._resolved_plot_colors(self._current_plotted_series)
+        current_color = current_colors.get(normalized_tag_name)
+        if current_color is None or current_color == normalized_color:
+            return
+
+        color_state = self._stored_tag_colors_state()
+        color_state[normalized_tag_name] = normalized_color
+
+        for other_tag_name, other_color in current_colors.items():
+            if other_tag_name == normalized_tag_name or other_color != normalized_color:
+                continue
+            color_state[other_tag_name] = current_color
+            break
+
+        if self._current_preview_tag_names:
+            self._preview_tags(self._current_preview_tag_names, persist_selection=False)
+        if persist:
+            self._handle_workspace_changed()
+
+    def _active_highlighted_tag_names(self) -> list[str]:
+        plotted_tag_names = {
+            plotted.series.tag_name for plotted in self._current_plotted_series
+        }
+        return [
+            tag_name
+            for tag_name in self._stored_highlighted_tag_names()
+            if tag_name in plotted_tag_names
+        ]
+
+    def _set_highlighted_tag_names(self, tag_names: list[str], *, persist: bool) -> None:
+        normalized_tag_names = _normalize_tag_names(tag_names)
+        if normalized_tag_names:
+            self._session.trend_state["highlighted_tag_names"] = list(normalized_tag_names)
+        else:
+            self._session.trend_state.pop("highlighted_tag_names", None)
+
+        if self._trend_plot_widget is not None:
+            self._trend_plot_widget.set_highlighted_tags(self._active_highlighted_tag_names())
+        self._update_plot_support_panels(self._current_plotted_series)
+        if persist:
+            self._handle_workspace_changed()
+
+    def _clear_all_legend_highlights(self, *, persist: bool) -> None:
+        self._set_highlighted_tag_names([], persist=persist)
+
+    def _checked_highlight_tag_names_from_legend(self) -> list[str]:
+        if self._legend_table is None:
+            return []
+
+        highlighted_tag_names: list[str] = []
+        for row_index in range(self._legend_table.rowCount()):
+            highlight_item = self._legend_table.item(row_index, LEGEND_HIGHLIGHT_COLUMN)
+            if highlight_item is None or highlight_item.checkState() != Qt.Checked:
+                continue
+            tag_name = str(highlight_item.data(Qt.UserRole) or "").strip()
+            if tag_name:
+                highlighted_tag_names.append(tag_name)
+        return highlighted_tag_names
 
     def _legacy_display_ranges_state(self) -> dict[str, object]:
         ranges = self._session.trend_state.get("display_ranges")
@@ -1503,7 +1641,7 @@ class TrendViewerMainWindow(QMainWindow):
             lines.insert(0, f"Custom: {custom_name}")
         unit = self._unit_for_tag(normalized_tag_name)
         if unit is not None:
-            lines.append(f"Unit: {unit}")
+            lines.append(f"Unit: {display_unit_text(unit) or unit}")
         return "\n".join(lines)
 
     def _imported_tag_display_text(self, tag_name: str) -> str:
@@ -1519,7 +1657,7 @@ class TrendViewerMainWindow(QMainWindow):
         else:
             parts.append(tag_name)
         if unit is not None:
-            parts.append(unit)
+            parts.append(display_unit_text(unit) or unit)
         return " | ".join(parts)
 
     def _hierarchy_tag_display_text(self, tag_name: str) -> str:
@@ -1535,7 +1673,7 @@ class TrendViewerMainWindow(QMainWindow):
         unit = self._unit_for_tag(tag_name)
         if unit is None:
             return label
-        return f"{label} {unit}"
+        return f"{label} {display_unit_text(unit) or unit}"
 
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
         self._update_legend_table(plotted_series)
@@ -1561,6 +1699,7 @@ class TrendViewerMainWindow(QMainWindow):
         if self._legend_table is None:
             return
 
+        active_highlighted_tags = set(self._active_highlighted_tag_names())
         self._suspend_legend_table_updates = True
         try:
             self._legend_table.setRowCount(0)
@@ -1568,61 +1707,114 @@ class TrendViewerMainWindow(QMainWindow):
                 self._legend_table.setRowCount(1)
                 placeholder = QTableWidgetItem("No plotted tags.")
                 placeholder.setFlags(Qt.NoItemFlags)
-                self._legend_table.setItem(0, 0, placeholder)
+                self._legend_table.setItem(0, LEGEND_TAG_COLUMN, placeholder)
                 return
 
             for row_index, plotted in enumerate(plotted_series):
-                color = QColor(PLOT_COLORS[row_index % len(PLOT_COLORS)])
+                tag_name = plotted.series.tag_name
+                color = QColor(
+                    self._current_plot_colors_by_tag.get(
+                        tag_name,
+                        PLOT_COLORS[row_index % len(PLOT_COLORS)],
+                    )
+                )
                 low_range, high_range = self._resolved_display_range(plotted)
-                tooltip = self._tag_tooltip_text(plotted.series.tag_name)
+                tooltip = self._tag_tooltip_text(tag_name)
+
+                highlight_item = QTableWidgetItem("")
+                highlight_item.setData(Qt.UserRole, tag_name)
+                highlight_item.setFlags(
+                    (highlight_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
+                highlight_item.setCheckState(
+                    Qt.Checked if tag_name in active_highlighted_tags else Qt.Unchecked
+                )
+                highlight_item.setToolTip("Check to highlight this tag and dim the others.")
+                highlight_item.setTextAlignment(Qt.AlignCenter)
 
                 tag_item = QTableWidgetItem(
                     self._display_label_for_tag(
-                        plotted.series.tag_name,
+                        tag_name,
                         include_unit=True,
                     )
                 )
-                tag_item.setData(Qt.UserRole, plotted.series.tag_name)
+                tag_item.setData(Qt.UserRole, tag_name)
                 tag_item.setForeground(color)
                 tag_item.setToolTip(tooltip)
                 tag_item.setFlags(tag_item.flags() & ~Qt.ItemIsEditable)
                 self._legend_table.insertRow(row_index)
-                self._legend_table.setItem(row_index, 0, tag_item)
+                self._legend_table.setItem(row_index, LEGEND_TAG_COLUMN, tag_item)
 
                 sheet_item = QTableWidgetItem(plotted.sheet.name)
-                sheet_item.setForeground(color)
                 sheet_item.setFlags(sheet_item.flags() & ~Qt.ItemIsEditable)
-                self._legend_table.setItem(row_index, 1, sheet_item)
+                self._legend_table.setItem(row_index, LEGEND_SHEET_COLUMN, sheet_item)
 
-                unit_item = QTableWidgetItem(self._unit_for_tag(plotted.series.tag_name) or "-")
-                unit_item.setForeground(color)
+                unit_item = QTableWidgetItem(
+                    display_unit_text(self._unit_for_tag(tag_name)) or "-"
+                )
                 unit_item.setToolTip(tooltip)
                 unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
-                self._legend_table.setItem(row_index, 2, unit_item)
+                self._legend_table.setItem(row_index, LEGEND_UNIT_COLUMN, unit_item)
 
                 low_item = QTableWidgetItem(_format_range_value(low_range))
-                low_item.setForeground(color)
-                low_item.setData(Qt.UserRole, plotted.series.tag_name)
-                self._legend_table.setItem(row_index, 3, low_item)
+                low_item.setData(Qt.UserRole, tag_name)
+                self._legend_table.setItem(row_index, LEGEND_LOW_RANGE_COLUMN, low_item)
 
                 high_item = QTableWidgetItem(_format_range_value(high_range))
-                high_item.setForeground(color)
-                high_item.setData(Qt.UserRole, plotted.series.tag_name)
-                self._legend_table.setItem(row_index, 4, high_item)
+                high_item.setData(Qt.UserRole, tag_name)
+                self._legend_table.setItem(row_index, LEGEND_HIGH_RANGE_COLUMN, high_item)
+
+                self._legend_table.setCellWidget(
+                    row_index,
+                    LEGEND_COLOR_COLUMN,
+                    self._build_legend_color_combo(tag_name, color.name().upper()),
+                )
+                self._legend_table.setItem(row_index, LEGEND_HIGHLIGHT_COLUMN, highlight_item)
         finally:
             self._suspend_legend_table_updates = False
 
         self._legend_table.resizeColumnsToContents()
 
+    def _build_legend_color_combo(self, tag_name: str, current_color: str) -> QComboBox:
+        combo = QComboBox(self._legend_table)
+        combo.setToolTip("Choose the plot color for this tag.")
+        for index, color in enumerate(PLOT_COLORS, start=1):
+            combo.addItem(_build_color_icon(color), f"Color {index}", color)
+
+        current_index = combo.findData(current_color)
+        combo.setCurrentIndex(current_index if current_index >= 0 else 0)
+        combo.currentIndexChanged.connect(
+            lambda index, *, combo=combo, tag_name=tag_name: self._handle_legend_color_changed(
+                tag_name,
+                combo.itemData(index),
+            )
+        )
+        return combo
+
+    def _handle_legend_color_changed(self, tag_name: str, color: object) -> None:
+        normalized_color = _normalize_plot_color(color)
+        if normalized_color is None:
+            return
+        self._set_plot_color_for_tag(tag_name, normalized_color, persist=True)
+
     def _handle_legend_table_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._suspend_legend_table_updates or item.column() not in {3, 4}:
+        if self._suspend_legend_table_updates:
             return
         if self._legend_table is None:
             return
 
-        tag_item = self._legend_table.item(item.row(), 0)
-        low_item = self._legend_table.item(item.row(), 3)
-        high_item = self._legend_table.item(item.row(), 4)
+        if item.column() == LEGEND_HIGHLIGHT_COLUMN:
+            self._set_highlighted_tag_names(
+                self._checked_highlight_tag_names_from_legend(),
+                persist=True,
+            )
+            return
+        if item.column() not in {LEGEND_LOW_RANGE_COLUMN, LEGEND_HIGH_RANGE_COLUMN}:
+            return
+
+        tag_item = self._legend_table.item(item.row(), LEGEND_TAG_COLUMN)
+        low_item = self._legend_table.item(item.row(), LEGEND_LOW_RANGE_COLUMN)
+        high_item = self._legend_table.item(item.row(), LEGEND_HIGH_RANGE_COLUMN)
         if tag_item is None or low_item is None or high_item is None:
             return
 
@@ -1666,8 +1858,8 @@ class TrendViewerMainWindow(QMainWindow):
         if self._legend_table is None:
             return
 
-        low_item = self._legend_table.item(row_index, 3)
-        high_item = self._legend_table.item(row_index, 4)
+        low_item = self._legend_table.item(row_index, LEGEND_LOW_RANGE_COLUMN)
+        high_item = self._legend_table.item(row_index, LEGEND_HIGH_RANGE_COLUMN)
         if low_item is None or high_item is None:
             return
 
@@ -1682,6 +1874,21 @@ class TrendViewerMainWindow(QMainWindow):
         if not self._current_preview_tag_names:
             return
         self._preview_tags(self._current_preview_tag_names, persist_selection=False)
+
+    def _show_legend_header_context_menu(self, position) -> None:
+        if self._legend_table is None:
+            return
+
+        header = self._legend_table.horizontalHeader()
+        if header.logicalIndexAt(position) != LEGEND_HIGHLIGHT_COLUMN:
+            return
+
+        menu = QMenu(header)
+        clear_action = menu.addAction("Clear all")
+        clear_action.setEnabled(bool(self._active_highlighted_tag_names()))
+        selected_action = menu.exec(header.mapToGlobal(position))
+        if selected_action is clear_action:
+            self._clear_all_legend_highlights(persist=True)
 
     def _update_analytics_table(self) -> None:
         if self._analytics_table is None:
@@ -1701,6 +1908,7 @@ class TrendViewerMainWindow(QMainWindow):
             tag_item = QTableWidgetItem(
                 self._display_label_for_tag(stats.tag_name, include_unit=True)
             )
+            tag_item.setForeground(QColor(stats.color))
             tag_item.setToolTip(self._tag_tooltip_text(stats.tag_name))
             self._analytics_table.setItem(row_index, 0, tag_item)
             self._analytics_table.setItem(
@@ -1846,6 +2054,25 @@ def _normalize_custom_name_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_plot_color(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    for color in PLOT_COLORS:
+        if color.casefold() == text.casefold():
+            return color
+    return None
+
+
+def _build_color_icon(color: str) -> QIcon:
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(QColor(color))
+    return QIcon(pixmap)
 
 
 def _format_range_value(value: float) -> str:

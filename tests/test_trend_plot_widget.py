@@ -8,6 +8,7 @@ import pytest
 
 from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
+    PLOT_COLORS,
     TrendPlotSeries,
     TrendVisibleSeriesStats,
     TrendPlotWidget,
@@ -19,6 +20,10 @@ from wte_trend_viewer.ui.widgets.trend_plot_widget import (
 
 
 def _make_plot_series() -> TrendPlotSeries:
+    return _make_named_plot_series("Pressure", [10.0, 15.0, 13.0])
+
+
+def _make_named_plot_series(tag_name: str, values: list[float]) -> TrendPlotSeries:
     timestamps = pl.Series(
         "Timestamp",
         [
@@ -28,10 +33,10 @@ def _make_plot_series() -> TrendPlotSeries:
         ],
     )
     series = TrendSeriesData(
-        tag_name="Pressure",
+        tag_name=tag_name,
         sheet_name="BoilerA",
-        source_column="Pressure",
-        values=pl.Series("Pressure", [10.0, 15.0, 13.0]),
+        source_column=tag_name,
+        values=pl.Series(tag_name, values),
     )
     sheet = TrendSheetData(
         name="BoilerA",
@@ -84,6 +89,60 @@ def test_cursor_label_is_in_navigation_row(qapp) -> None:
 
     assert widget._cursor_label.parent() is widget._visible_range_label.parent()
     assert widget._cursor_label.parent() is not widget
+
+
+def test_plot_color_palette_is_large_and_unique() -> None:
+    assert len(PLOT_COLORS) >= 20
+    assert len(set(PLOT_COLORS)) == len(PLOT_COLORS)
+
+
+def test_highlighted_tags_dim_other_series(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted_series = [
+        _make_named_plot_series("TagA", [10.0, 15.0, 13.0]),
+        _make_named_plot_series("TagB", [4.0, 5.0, 6.0]),
+    ]
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=plotted_series)
+
+    widget.set_highlighted_tags(["TagA"])
+
+    tag_a_pen = widget._prepared_series[0].curve.opts["pen"]
+    tag_b_pen = widget._prepared_series[1].curve.opts["pen"]
+    assert tag_a_pen.color().alpha() == 255
+    assert tag_b_pen.color().alpha() < 255
+
+
+def test_widget_uses_provided_series_colors(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted_series = [
+        _make_named_plot_series("TagA", [10.0, 15.0, 13.0]),
+        _make_named_plot_series("TagB", [4.0, 5.0, 6.0]),
+    ]
+    series_colors_by_tag = {
+        "TagA": "#FFED6F",
+        "TagB": "#00C2FF",
+    }
+    widget.plot_series_group(
+        workbook_name="Workbook",
+        plotted_series=plotted_series,
+        series_colors_by_tag=series_colors_by_tag,
+    )
+
+    assert widget._prepared_series[0].color == "#FFED6F"
+    assert widget._prepared_series[1].color == "#00C2FF"
+    assert widget._prepared_series[0].curve.opts["pen"].color().name().upper() == "#FFED6F"
+    assert widget._prepared_series[1].curve.opts["pen"].color().name().upper() == "#00C2FF"
+
+
+def test_left_axis_label_is_hidden(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted = _make_plot_series()
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=[plotted])
+
+    left_axis = widget._plot_widget.getPlotItem().getAxis("left")
+
+    assert left_axis.labelText == ""
+    assert left_axis.style["showValues"] is False
 
 
 def test_summary_text_includes_empty_state_message() -> None:

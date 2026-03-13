@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QDateTime, QEvent, QSignalBlocker, QTimer, Qt, Signal, QTimeZone
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
@@ -34,6 +35,20 @@ PLOT_COLORS = (
     "#E06C75",
     "#C678DD",
     "#E5C07B",
+    "#56B4E9",
+    "#009E73",
+    "#D55E00",
+    "#CC79A7",
+    "#8DD3C7",
+    "#FDB462",
+    "#B3DE69",
+    "#FCCDE5",
+    "#80B1D3",
+    "#FB8072",
+    "#BC80BD",
+    "#FFED6F",
+    "#00C2FF",
+    "#7AE582",
 )
 MIN_VISIBLE_SAMPLES = 800
 DISPLAY_Y_MIN = 0.0
@@ -43,6 +58,7 @@ SCALE_PANEL_COLUMN_SPACING = 6
 SCALE_PANEL_MIN_WIDTH = 92
 SCALE_PANEL_TAGS_PER_COLUMN = 5
 SCALE_PANEL_STRETCH_RESET_COLUMNS = 12
+HIGHLIGHT_DIM_ALPHA = 68
 TIME_MODE_DURATION = "duration"
 TIME_MODE_END = "end"
 DEFAULT_DURATION_PRESETS = (
@@ -243,6 +259,7 @@ class TrendPlotWidget(QWidget):
         self._requested_time_range: tuple[float, float] | None = None
         self._pending_x_range: tuple[float, float] | None = None
         self._current_cursor_x: float | None = None
+        self._highlighted_tag_names: set[str] = set()
         self._suspend_range_updates = False
         self._suspend_time_control_updates = False
 
@@ -486,6 +503,12 @@ class TrendPlotWidget(QWidget):
         self._set_navigation_enabled(False)
         self.visibleStatsChanged.emit([])
 
+    def set_highlighted_tags(self, tag_names: list[str]) -> None:
+        self._highlighted_tag_names = {
+            str(tag_name).strip() for tag_name in tag_names if str(tag_name).strip()
+        }
+        self._apply_highlight_state()
+
     def plot_series_group(
         self,
         *,
@@ -493,6 +516,7 @@ class TrendPlotWidget(QWidget):
         plotted_series: list[TrendPlotSeries],
         display_ranges_by_tag: dict[str, tuple[float, float]] | None = None,
         display_labels_by_tag: dict[str, str] | None = None,
+        series_colors_by_tag: dict[str, str] | None = None,
     ) -> None:
         plot_item = self._plot_widget.getPlotItem()
         self._reset_plot_item()
@@ -509,7 +533,11 @@ class TrendPlotWidget(QWidget):
 
             x_array = np.asarray(x_values, dtype=np.float64)
             y_array = np.asarray(y_values, dtype=np.float64)
-            color = PLOT_COLORS[index % len(PLOT_COLORS)]
+            color = _resolved_series_color(
+                plotted.series.tag_name,
+                series_colors_by_tag,
+                fallback=PLOT_COLORS[index % len(PLOT_COLORS)],
+            )
             low_range, high_range = _resolved_series_display_range(
                 plotted.series.tag_name,
                 display_ranges_by_tag,
@@ -560,14 +588,14 @@ class TrendPlotWidget(QWidget):
             else f"{len(prepared_series)} selected tags"
         )
         plot_item.setTitle(title)
-        plot_item.setLabel("left", "Scaled %")
+        plot_item.setLabel("left", "")
         plot_item.setLabel("bottom", "Time")
 
         self._current_workbook_name = workbook_name
         self._current_plotted_series = [prepared.plotted for prepared in prepared_series]
         self._prepared_series = prepared_series
         self._summary_label.hide()
-        self._set_shared_scale_labels(prepared_series)
+        self._apply_highlight_state()
         x_min = min(x_min_values)
         x_max = max(x_max_values)
         self._data_x_range = (x_min, x_max)
@@ -873,13 +901,40 @@ class TrendPlotWidget(QWidget):
             autoExpandTextSpace=False,
             autoReduceTextSpace=True,
         )
+        left_axis.setWidth(0)
         left_axis.setFixedWidth(0)
+        left_axis.setMinimumWidth(0)
+        left_axis.setMaximumWidth(0)
         plot_item.showAxis("left", False)
         plot_item.hideAxis("left")
         plot_item.layout.setColumnFixedWidth(0, 0)
+        plot_item.setLabel("left", "")
         plot_item.setLabel("bottom", "Time")
         self._cursor_line.hide()
         plot_item.addItem(self._cursor_line, ignoreBounds=True)
+
+    def _apply_highlight_state(self) -> None:
+        active_highlighted_tags = self._active_highlighted_tag_names()
+        highlight_is_active = bool(active_highlighted_tags)
+
+        for prepared in self._prepared_series:
+            is_dimmed = (
+                highlight_is_active
+                and prepared.plotted.series.tag_name not in active_highlighted_tags
+            )
+            prepared.curve.setPen(pg.mkPen(_series_qcolor(prepared.color, dimmed=is_dimmed), width=2))
+
+        self._set_shared_scale_labels(self._prepared_series)
+
+    def _active_highlighted_tag_names(self) -> set[str]:
+        prepared_tag_names = {
+            prepared.plotted.series.tag_name for prepared in self._prepared_series
+        }
+        return {
+            tag_name
+            for tag_name in self._highlighted_tag_names
+            if tag_name in prepared_tag_names
+        }
 
     def _set_shared_scale_labels(
         self,
@@ -904,15 +959,22 @@ class TrendPlotWidget(QWidget):
         _configure_scale_grid(self._shared_scale_mid_layout, column_widths)
         _configure_scale_grid(self._shared_scale_bottom_layout, column_widths)
 
+        active_highlighted_tags = self._active_highlighted_tag_names()
+        highlight_is_active = bool(active_highlighted_tags)
         for index, prepared in enumerate(prepared_series):
             row_index = index % SCALE_PANEL_TAGS_PER_COLUMN
             column_index = index // SCALE_PANEL_TAGS_PER_COLUMN
             midpoint = (prepared.display_low_range + prepared.display_high_range) / 2.0
+            is_dimmed = (
+                highlight_is_active
+                and prepared.plotted.series.tag_name not in active_highlighted_tags
+            )
             self._shared_scale_top_layout.addWidget(
                 self._build_scale_label(
                     value=prepared.display_high_range,
                     color=prepared.color,
                     tooltip=f"{prepared.display_label} high range",
+                    dimmed=is_dimmed,
                 ),
                 row_index,
                 column_index,
@@ -922,6 +984,7 @@ class TrendPlotWidget(QWidget):
                     value=midpoint,
                     color=prepared.color,
                     tooltip=f"{prepared.display_label} midpoint",
+                    dimmed=is_dimmed,
                 ),
                 row_index,
                 column_index,
@@ -931,6 +994,7 @@ class TrendPlotWidget(QWidget):
                     value=prepared.display_low_range,
                     color=prepared.color,
                     tooltip=f"{prepared.display_label} low range",
+                    dimmed=is_dimmed,
                 ),
                 row_index,
                 column_index,
@@ -938,10 +1002,17 @@ class TrendPlotWidget(QWidget):
 
         self._shared_scale_panel.show()
 
-    def _build_scale_label(self, *, value: float, color: str, tooltip: str) -> QLabel:
+    def _build_scale_label(
+        self,
+        *,
+        value: float,
+        color: str,
+        tooltip: str,
+        dimmed: bool = False,
+    ) -> QLabel:
         label = QLabel(_format_scale_value(value), self._shared_scale_panel)
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        label.setStyleSheet(f"color: {color};")
+        label.setStyleSheet(f"color: {_qcolor_to_css(_series_qcolor(color, dimmed=dimmed))};")
         label.setToolTip(tooltip)
         label.setFrameStyle(QFrame.NoFrame)
         return label
@@ -1180,6 +1251,17 @@ def _shared_scale_panel_width(column_widths: list[int]) -> int:
     )
 
 
+def _series_qcolor(color: str, *, dimmed: bool) -> QColor:
+    qcolor = QColor(color)
+    if dimmed:
+        qcolor.setAlpha(HIGHLIGHT_DIM_ALPHA)
+    return qcolor
+
+
+def _qcolor_to_css(color: QColor) -> str:
+    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
+
+
 def _format_time_range(start_epoch: float, end_epoch: float) -> str:
     start = _format_timestamp(start_epoch)
     end = _format_timestamp(end_epoch)
@@ -1266,6 +1348,19 @@ def _resolved_series_display_range(
             if np.isfinite(low_range) and np.isfinite(high_range) and low_range < high_range:
                 return float(low_range), float(high_range)
     return 0.0, 1.0
+
+
+def _resolved_series_color(
+    tag_name: str,
+    series_colors_by_tag: dict[str, str] | None,
+    *,
+    fallback: str,
+) -> str:
+    if series_colors_by_tag is not None:
+        color = series_colors_by_tag.get(tag_name)
+        if isinstance(color, str) and color.strip():
+            return color.strip().upper()
+    return fallback
 
 
 def _normalize_display_values(

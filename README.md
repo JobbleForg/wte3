@@ -1,11 +1,95 @@
 # WTE Trend Viewer
 
-Initial PySide6 shell for the WTE3 desktop trend viewer.
+Desktop trend viewer for workbook-based SCADA trend analysis.
 
-## Run
+## Requirements
+
+- `Python 3.12+`
+- `git`
+- On WSL: a GUI-capable setup such as `WSLg`
+
+## Clone
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/JobbleForg/wte3.git
+cd wte3
+```
+
+WSL / Linux:
+
+```bash
+git clone https://github.com/JobbleForg/wte3.git
+cd wte3
+```
+
+## Install
+
+Windows PowerShell:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -e .
-.\.venv\Scripts\wte-trend-viewer
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e .[dev]
 ```
+
+WSL / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .[dev]
+```
+
+## Run
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m wte_trend_viewer
+```
+
+WSL / Linux:
+
+```bash
+source .venv/bin/activate
+python -m wte_trend_viewer
+```
+
+You can also use the installed entry point:
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\wte-trend-viewer.exe
+```
+
+WSL / Linux:
+
+```bash
+source .venv/bin/activate
+wte-trend-viewer
+```
+
+## Test
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+WSL / Linux:
+
+```bash
+source .venv/bin/activate
+python -m pytest
+```
+
+## Notes
+
+- The sample workbook used during development is `sample-data.xlsx`.
+- Sessions are restored automatically between launches.
+- On WSL, if the app does not open, check that GUI forwarding is available.

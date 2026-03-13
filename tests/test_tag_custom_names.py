@@ -3,10 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 
 import polars as pl
+from PySide6.QtCore import Qt
 
 from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.session import SessionStore
-from wte_trend_viewer.ui.main_window import TrendViewerMainWindow
+from wte_trend_viewer.ui.main_window import (
+    LEGEND_HIGH_RANGE_COLUMN,
+    LEGEND_SHEET_COLUMN,
+    LEGEND_TAG_COLUMN,
+    LEGEND_UNIT_COLUMN,
+    LEGEND_LOW_RANGE_COLUMN,
+    TrendViewerMainWindow,
+)
 from wte_trend_viewer.ui.widgets.hierarchy_tree import SearchableHierarchyTree
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
     TrendPlotSeries,
@@ -57,7 +65,7 @@ def test_custom_name_updates_imported_and_hierarchy_labels(qapp, tmp_path) -> No
     )
     original_name = "Process Data/TAG001"
     custom_name = "TAG001 - Example temperature"
-    unit = "[C]"
+    unit = "C"
 
     window.set_imported_tags([original_name], persist=False)
     group = window._hierarchy_tree.add_category("Group", emit_change=False)
@@ -69,10 +77,10 @@ def test_custom_name_updates_imported_and_hierarchy_labels(qapp, tmp_path) -> No
     imported_item = window._imported_tags_list.find_item_by_tag_name(original_name)
 
     assert imported_item is not None
-    assert imported_item.text() == f"{custom_name} | {original_name} | {unit}"
-    assert hierarchy_tag.text(0) == f"{custom_name} {unit}"
+    assert imported_item.text() == f"{custom_name} | {original_name} | [C]"
+    assert hierarchy_tag.text(0) == f"{custom_name} [C]"
     assert imported_item.toolTip() == (
-        f"Custom: {custom_name}\nOriginal: {original_name}\nUnit: {unit}"
+        f"Custom: {custom_name}\nOriginal: {original_name}\nUnit: [C]"
     )
 
 
@@ -123,7 +131,7 @@ def test_legend_and_analytics_use_custom_label_with_unit(qapp, tmp_path) -> None
     )
     original_name = "Process Data/TAG001"
     custom_name = "TAG001 - Example temperature"
-    unit = "[C]"
+    unit = "C"
     plotted = _make_plot_series(original_name)
 
     window._set_custom_name_for_tag(original_name, custom_name, persist=False)
@@ -145,6 +153,42 @@ def test_legend_and_analytics_use_custom_label_with_unit(qapp, tmp_path) -> None
     window._update_analytics_table()
 
     assert window._legend_table is not None
-    assert window._legend_table.item(0, 0).text() == f"{custom_name} {unit}"
+    assert window._legend_table.item(0, LEGEND_TAG_COLUMN).text() == f"{custom_name} [C]"
+    assert (
+        window._legend_table.item(0, LEGEND_TAG_COLUMN).foreground().style()
+        == Qt.BrushStyle.SolidPattern
+    )
+    assert (
+        window._legend_table.item(0, LEGEND_SHEET_COLUMN).foreground().style()
+        == Qt.BrushStyle.NoBrush
+    )
+    assert (
+        window._legend_table.item(0, LEGEND_UNIT_COLUMN).foreground().style()
+        == Qt.BrushStyle.NoBrush
+    )
+    assert (
+        window._legend_table.item(0, LEGEND_LOW_RANGE_COLUMN).foreground().style()
+        == Qt.BrushStyle.NoBrush
+    )
+    assert (
+        window._legend_table.item(0, LEGEND_HIGH_RANGE_COLUMN).foreground().style()
+        == Qt.BrushStyle.NoBrush
+    )
     assert window._analytics_table is not None
-    assert window._analytics_table.item(0, 0).text() == f"{custom_name} {unit}"
+    assert window._analytics_table.item(0, 0).text() == f"{custom_name} [C]"
+    assert window._analytics_table.item(0, 0).foreground().style() == Qt.BrushStyle.SolidPattern
+    assert window._analytics_table.item(0, 1).foreground().style() == Qt.BrushStyle.NoBrush
+
+
+def test_bottom_tabs_are_legend_analytics_settings(qapp, tmp_path) -> None:
+    window = TrendViewerMainWindow(
+        session_store=SessionStore(tmp_path),
+        restore_last_session=False,
+    )
+
+    assert window._bottom_tabs is not None
+    assert [window._bottom_tabs.tabText(index) for index in range(window._bottom_tabs.count())] == [
+        "Legend",
+        "Analytics",
+        "Settings",
+    ]
