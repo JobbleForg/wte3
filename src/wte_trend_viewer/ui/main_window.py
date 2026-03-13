@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, Qt
@@ -41,6 +42,7 @@ from .widgets.hierarchy_tree import (
 from .widgets.imported_tag_list import SearchableImportedTagList
 from .widgets.trend_plot_widget import (
     PLOT_COLORS,
+    TrendCursorSeriesStats,
     TrendCursorStats,
     TrendPlotSeries,
     TrendPlotWidget,
@@ -302,9 +304,19 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._analytics_table = QTableWidget(0, 6, container)
+        self._analytics_table = QTableWidget(0, 9, container)
         self._analytics_table.setHorizontalHeaderLabels(
-            ["Tag", "Cursor Value", "Visible Last", "Window Min", "Window Max", "Window Avg"]
+            [
+                "Tag",
+                "Prev Value",
+                "Cursor Value",
+                "Interp Value",
+                "Next Value",
+                "Visible Last",
+                "Window Min",
+                "Window Max",
+                "Window Avg",
+            ]
         )
         self._analytics_table.verticalHeader().setVisible(False)
         self._analytics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -882,30 +894,57 @@ class TrendViewerMainWindow(QMainWindow):
         if self._analytics_table is None:
             return
 
-        cursor_values_by_tag: dict[str, float | None] = {}
+        cursor_stats_by_tag: dict[str, TrendCursorSeriesStats] = {}
         if self._current_cursor_stats is not None:
-            cursor_values_by_tag = {
-                stats.tag_name: stats.cursor_value
+            cursor_stats_by_tag = {
+                stats.tag_name: stats
                 for stats in self._current_cursor_stats.series_stats
             }
 
         self._analytics_table.setRowCount(0)
         for row_index, stats in enumerate(self._current_visible_stats):
             self._analytics_table.insertRow(row_index)
-            values = [
-                stats.tag_name,
-                _format_numeric(cursor_values_by_tag.get(stats.tag_name)),
-                _format_numeric(stats.latest_value),
-                _format_numeric(stats.minimum_value),
-                _format_numeric(stats.maximum_value),
-                _format_numeric(stats.average_value),
-            ]
-            for column_index, value in enumerate(values):
-                self._analytics_table.setItem(
-                    row_index,
-                    column_index,
-                    QTableWidgetItem(value),
-                )
+            cursor_stats = cursor_stats_by_tag.get(stats.tag_name)
+            self._analytics_table.setItem(row_index, 0, QTableWidgetItem(stats.tag_name))
+            self._analytics_table.setItem(
+                row_index,
+                1,
+                _build_numeric_item(
+                    cursor_stats.previous_value if cursor_stats is not None else None,
+                    timestamp=cursor_stats.previous_timestamp if cursor_stats is not None else None,
+                    timestamp_label="Previous sample",
+                ),
+            )
+            self._analytics_table.setItem(
+                row_index,
+                2,
+                _build_numeric_item(
+                    cursor_stats.cursor_value if cursor_stats is not None else None,
+                    timestamp=cursor_stats.sample_timestamp if cursor_stats is not None else None,
+                    timestamp_label="Nearest sample",
+                ),
+            )
+            self._analytics_table.setItem(
+                row_index,
+                3,
+                _build_numeric_item(
+                    cursor_stats.interpolated_value if cursor_stats is not None else None,
+                    tooltip=_build_interpolation_tooltip(cursor_stats),
+                ),
+            )
+            self._analytics_table.setItem(
+                row_index,
+                4,
+                _build_numeric_item(
+                    cursor_stats.next_value if cursor_stats is not None else None,
+                    timestamp=cursor_stats.next_timestamp if cursor_stats is not None else None,
+                    timestamp_label="Next sample",
+                ),
+            )
+            self._analytics_table.setItem(row_index, 5, _build_numeric_item(stats.latest_value))
+            self._analytics_table.setItem(row_index, 6, _build_numeric_item(stats.minimum_value))
+            self._analytics_table.setItem(row_index, 7, _build_numeric_item(stats.maximum_value))
+            self._analytics_table.setItem(row_index, 8, _build_numeric_item(stats.average_value))
 
         self._analytics_table.resizeColumnsToContents()
 
@@ -953,3 +992,51 @@ def _coerce_positive_int(value: object, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return coerced if coerced > 0 else default
+
+
+def _build_numeric_item(
+    value: float | None,
+    *,
+    timestamp: float | None = None,
+    timestamp_label: str = "Sample",
+    tooltip: str | None = None,
+) -> QTableWidgetItem:
+    item = QTableWidgetItem(_format_numeric(value))
+    if tooltip is not None:
+        item.setToolTip(tooltip)
+    elif timestamp is not None:
+        item.setToolTip(f"{timestamp_label}: {_format_timestamp(timestamp)}")
+    return item
+
+
+def _format_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_interpolation_tooltip(cursor_stats: TrendCursorSeriesStats | None) -> str | None:
+    if cursor_stats is None:
+        return None
+
+    if cursor_stats.interpolation_mode == "exact":
+        timestamp = cursor_stats.interpolation_start_timestamp
+        if timestamp is None:
+            return "Interpolation: exact sample"
+        return f"Interpolation: exact sample at {_format_timestamp(timestamp)}"
+
+    if cursor_stats.interpolation_mode == "linear":
+        start = cursor_stats.interpolation_start_timestamp
+        end = cursor_stats.interpolation_end_timestamp
+        if start is None or end is None:
+            return "Interpolation: linear"
+        return (
+            "Interpolation: linear between "
+            f"{_format_timestamp(start)} and {_format_timestamp(end)}"
+        )
+
+    if cursor_stats.interpolation_mode == "nearest":
+        timestamp = cursor_stats.interpolation_start_timestamp
+        if timestamp is None:
+            return "Interpolation: nearest-sample fallback"
+        return f"Interpolation: nearest-sample fallback at {_format_timestamp(timestamp)}"
+
+    return None

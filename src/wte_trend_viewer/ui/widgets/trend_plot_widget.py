@@ -60,6 +60,14 @@ class TrendCursorSeriesStats:
     color: str
     sample_timestamp: float | None
     cursor_value: float | None
+    interpolated_value: float | None
+    interpolation_mode: str
+    interpolation_start_timestamp: float | None
+    interpolation_end_timestamp: float | None
+    previous_timestamp: float | None
+    previous_value: float | None
+    next_timestamp: float | None
+    next_value: float | None
 
 
 @dataclass(frozen=True)
@@ -1067,14 +1075,48 @@ class TrendPlotWidget(QWidget):
     def _build_cursor_stats(self, cursor_x: float) -> TrendCursorStats:
         series_stats: list[TrendCursorSeriesStats] = []
         for prepared in self._prepared_series:
-            nearest_index = _nearest_index(prepared.x_values, cursor_x)
+            previous_index, nearest_index, next_index = _cursor_sample_indices(
+                prepared.x_values,
+                cursor_x,
+            )
+            previous_timestamp: float | None = None
+            previous_value: float | None = None
             sample_timestamp: float | None = None
             cursor_value: float | None = None
+            interpolated_value: float | None = None
+            interpolation_mode = "unavailable"
+            interpolation_start_timestamp: float | None = None
+            interpolation_end_timestamp: float | None = None
+            next_timestamp: float | None = None
+            next_value: float | None = None
+            if previous_index is not None:
+                previous_timestamp = float(prepared.x_values[previous_index])
+                value = float(prepared.y_values[previous_index])
+                if np.isfinite(value):
+                    previous_value = value
             if nearest_index is not None:
                 sample_timestamp = float(prepared.x_values[nearest_index])
                 value = float(prepared.y_values[nearest_index])
                 if np.isfinite(value):
                     cursor_value = value
+            if next_index is not None:
+                next_timestamp = float(prepared.x_values[next_index])
+                value = float(prepared.y_values[next_index])
+                if np.isfinite(value):
+                    next_value = value
+            (
+                interpolated_value,
+                interpolation_mode,
+                interpolation_start_timestamp,
+                interpolation_end_timestamp,
+            ) = _interpolated_cursor_value(
+                prepared.x_values,
+                prepared.y_values,
+                cursor_x,
+                previous_index=previous_index,
+                nearest_index=nearest_index,
+                next_index=next_index,
+            )
 
             series_stats.append(
                 TrendCursorSeriesStats(
@@ -1083,6 +1125,14 @@ class TrendPlotWidget(QWidget):
                     color=prepared.color,
                     sample_timestamp=sample_timestamp,
                     cursor_value=cursor_value,
+                    interpolated_value=interpolated_value,
+                    interpolation_mode=interpolation_mode,
+                    interpolation_start_timestamp=interpolation_start_timestamp,
+                    interpolation_end_timestamp=interpolation_end_timestamp,
+                    previous_timestamp=previous_timestamp,
+                    previous_value=previous_value,
+                    next_timestamp=next_timestamp,
+                    next_value=next_value,
                 )
             )
 
@@ -1194,22 +1244,70 @@ def _downsample_visible_slice(
     return x_values[unique_indices], y_values[unique_indices]
 
 
-def _nearest_index(x_values: np.ndarray, target_x: float) -> int | None:
+def _cursor_sample_indices(
+    x_values: np.ndarray,
+    target_x: float,
+) -> tuple[int | None, int | None, int | None]:
     if x_values.size == 0:
-        return None
+        return None, None, None
 
-    right_index = int(np.searchsorted(x_values, target_x, side="left"))
-    if right_index <= 0:
-        return 0
-    if right_index >= x_values.size:
-        return int(x_values.size - 1)
+    left_insert_index = int(np.searchsorted(x_values, target_x, side="left"))
+    right_insert_index = int(np.searchsorted(x_values, target_x, side="right"))
 
-    left_index = right_index - 1
+    previous_index = left_insert_index - 1 if left_insert_index > 0 else None
+    next_index = right_insert_index if right_insert_index < x_values.size else None
+
+    if left_insert_index <= 0:
+        return previous_index, 0, next_index
+    if left_insert_index >= x_values.size:
+        return previous_index, int(x_values.size - 1), next_index
+
+    right_index = left_insert_index
+    left_index = left_insert_index - 1
     left_distance = abs(float(x_values[left_index]) - target_x)
     right_distance = abs(float(x_values[right_index]) - target_x)
     if right_distance < left_distance:
-        return right_index
-    return left_index
+        return previous_index, right_index, next_index
+    return previous_index, left_index, next_index
+
+
+def _interpolated_cursor_value(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    target_x: float,
+    *,
+    previous_index: int | None,
+    nearest_index: int | None,
+    next_index: int | None,
+) -> tuple[float | None, str, float | None, float | None]:
+    if nearest_index is not None:
+        nearest_x = float(x_values[nearest_index])
+        nearest_y = float(y_values[nearest_index])
+        if nearest_x == target_x and np.isfinite(nearest_y):
+            return nearest_y, "exact", nearest_x, nearest_x
+
+    if previous_index is not None and next_index is not None:
+        start_x = float(x_values[previous_index])
+        end_x = float(x_values[next_index])
+        start_y = float(y_values[previous_index])
+        end_y = float(y_values[next_index])
+        if (
+            np.isfinite(start_y)
+            and np.isfinite(end_y)
+            and end_x != start_x
+            and start_x <= target_x <= end_x
+        ):
+            fraction = (target_x - start_x) / (end_x - start_x)
+            value = start_y + ((end_y - start_y) * fraction)
+            return float(value), "linear", start_x, end_x
+
+    if nearest_index is not None:
+        nearest_x = float(x_values[nearest_index])
+        nearest_y = float(y_values[nearest_index])
+        if np.isfinite(nearest_y):
+            return nearest_y, "nearest", nearest_x, nearest_x
+
+    return None, "unavailable", None, None
 
 
 def _clamp_x_range(
