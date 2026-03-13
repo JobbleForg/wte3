@@ -14,6 +14,9 @@ Why this matters:
 - the WSL review repo used for the issue report is behind the current Windows repo state
 - current `main` already includes newer cursor analytics and the shared-range redesign handoff
 
+Related review note:
+- see `CODEXCLI_PR_INTEGRATION_NOTES.md` for the March 13, 2026 PR salvage/rejection rationale and the exact reasons the PR branches should not be merged directly
+
 ## Safe scope for CodexCLI
 
 CodexCLI may work on a branch for the cursor issue report, but should stay inside this scope:
