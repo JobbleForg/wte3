@@ -41,6 +41,7 @@ from .widgets.hierarchy_tree import (
 from .widgets.imported_tag_list import SearchableImportedTagList
 from .widgets.trend_plot_widget import (
     PLOT_COLORS,
+    TrendCursorStats,
     TrendPlotSeries,
     TrendPlotWidget,
     TrendVisibleSeriesStats,
@@ -95,6 +96,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._analytics_table: QTableWidget | None = None
         self._current_plotted_series: list[TrendPlotSeries] = []
         self._current_visible_stats: list[TrendVisibleSeriesStats] = []
+        self._current_cursor_stats: TrendCursorStats | None = None
         self._current_preview_tag_names: list[str] = []
 
         self._build_toolbar()
@@ -260,6 +262,7 @@ class TrendViewerMainWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         self._trend_plot_widget = TrendPlotWidget(viewport)
         self._trend_plot_widget.visibleStatsChanged.connect(self._handle_plot_visible_stats_changed)
+        self._trend_plot_widget.cursorStatsChanged.connect(self._handle_plot_cursor_stats_changed)
         self._trend_plot_widget.panFractionChanged.connect(self._handle_workspace_changed)
         self._trend_plot_widget.legendStateChanged.connect(self._handle_workspace_changed)
 
@@ -299,9 +302,9 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._analytics_table = QTableWidget(0, 5, container)
+        self._analytics_table = QTableWidget(0, 6, container)
         self._analytics_table.setHorizontalHeaderLabels(
-            ["Tag", "Visible Last", "Window Min", "Window Max", "Window Avg"]
+            ["Tag", "Cursor Value", "Visible Last", "Window Min", "Window Max", "Window Avg"]
         )
         self._analytics_table.verticalHeader().setVisible(False)
         self._analytics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -687,6 +690,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._loaded_workbook = None
         self._current_plotted_series = []
         self._current_visible_stats = []
+        self._current_cursor_stats = None
         self._current_preview_tag_names = []
         self._update_trend_summary()
 
@@ -717,6 +721,7 @@ class TrendViewerMainWindow(QMainWindow):
         if not selected_tag_names:
             self._current_plotted_series = []
             self._current_visible_stats = []
+            self._current_cursor_stats = None
             self._current_preview_tag_names = []
             self._update_trend_summary()
             self._handle_workspace_changed()
@@ -739,6 +744,7 @@ class TrendViewerMainWindow(QMainWindow):
         if self._loaded_workbook is None or self._trend_plot_widget is None:
             self._current_plotted_series = []
             self._current_visible_stats = []
+            self._current_cursor_stats = None
             self._current_preview_tag_names = []
             self._update_trend_summary()
             return False
@@ -759,6 +765,7 @@ class TrendViewerMainWindow(QMainWindow):
         if not plotted_series:
             self._current_plotted_series = []
             self._current_visible_stats = []
+            self._current_cursor_stats = None
             self._current_preview_tag_names = []
             self._update_trend_summary()
             return False
@@ -834,7 +841,7 @@ class TrendViewerMainWindow(QMainWindow):
 
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
         self._update_legend_list(plotted_series)
-        self._update_analytics_table(self._current_visible_stats)
+        self._update_analytics_table()
 
     def _handle_plot_visible_stats_changed(self, visible_stats: object) -> None:
         if isinstance(visible_stats, list):
@@ -843,7 +850,14 @@ class TrendViewerMainWindow(QMainWindow):
             ]
         else:
             self._current_visible_stats = []
-        self._update_analytics_table(self._current_visible_stats)
+        self._update_analytics_table()
+
+    def _handle_plot_cursor_stats_changed(self, cursor_stats: object) -> None:
+        if isinstance(cursor_stats, TrendCursorStats):
+            self._current_cursor_stats = cursor_stats
+        else:
+            self._current_cursor_stats = None
+        self._update_analytics_table()
 
     def _update_legend_list(self, plotted_series: list[TrendPlotSeries]) -> None:
         if self._legend_list is None:
@@ -864,15 +878,23 @@ class TrendViewerMainWindow(QMainWindow):
             item.setData(Qt.UserRole, plotted.series.tag_name)
             self._legend_list.addItem(item)
 
-    def _update_analytics_table(self, visible_stats: list[TrendVisibleSeriesStats]) -> None:
+    def _update_analytics_table(self) -> None:
         if self._analytics_table is None:
             return
 
+        cursor_values_by_tag: dict[str, float | None] = {}
+        if self._current_cursor_stats is not None:
+            cursor_values_by_tag = {
+                stats.tag_name: stats.cursor_value
+                for stats in self._current_cursor_stats.series_stats
+            }
+
         self._analytics_table.setRowCount(0)
-        for row_index, stats in enumerate(visible_stats):
+        for row_index, stats in enumerate(self._current_visible_stats):
             self._analytics_table.insertRow(row_index)
             values = [
                 stats.tag_name,
+                _format_numeric(cursor_values_by_tag.get(stats.tag_name)),
                 _format_numeric(stats.latest_value),
                 _format_numeric(stats.minimum_value),
                 _format_numeric(stats.maximum_value),

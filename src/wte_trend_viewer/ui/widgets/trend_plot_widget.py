@@ -53,6 +53,21 @@ class TrendVisibleSeriesStats:
     average_value: float | None
 
 
+@dataclass(frozen=True)
+class TrendCursorSeriesStats:
+    tag_name: str
+    sheet_name: str
+    color: str
+    sample_timestamp: float | None
+    cursor_value: float | None
+
+
+@dataclass(frozen=True)
+class TrendCursorStats:
+    cursor_timestamp: float
+    series_stats: tuple[TrendCursorSeriesStats, ...]
+
+
 @dataclass
 class _PreparedTrendPlotSeries:
     plotted: TrendPlotSeries
@@ -589,6 +604,7 @@ class TrendPlotWidget(QWidget):
 
     visibleRangeChanged = Signal(float, float)
     visibleStatsChanged = Signal(object)
+    cursorStatsChanged = Signal(object)
     panFractionChanged = Signal(int, int)
     legendStateChanged = Signal()
 
@@ -603,6 +619,11 @@ class TrendPlotWidget(QWidget):
         self._summary_label.setAlignment(Qt.AlignCenter)
         self._summary_label.setWordWrap(True)
         layout.addWidget(self._summary_label)
+
+        self._cursor_label = QLabel(self)
+        self._cursor_label.setAlignment(Qt.AlignCenter)
+        self._cursor_label.hide()
+        layout.addWidget(self._cursor_label)
 
         axis_items = {"bottom": pg.DateAxisItem(orientation="bottom")}
         self._plot_widget = pg.PlotWidget(axisItems=axis_items, parent=self)
@@ -620,6 +641,7 @@ class TrendPlotWidget(QWidget):
         self._prepared_series: list[_PreparedTrendPlotSeries] = []
         self._data_x_range: tuple[float, float] | None = None
         self._pending_x_range: tuple[float, float] | None = None
+        self._current_cursor_x: float | None = None
         self._suspend_range_updates = False
 
         self._range_update_timer = QTimer(self)
@@ -627,11 +649,22 @@ class TrendPlotWidget(QWidget):
         self._range_update_timer.setInterval(24)
         self._range_update_timer.timeout.connect(self._apply_pending_range_update)
 
+        self._cursor_line = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#D8DFE6", width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._cursor_line.setZValue(1_000)
+        self._cursor_line.hide()
+
         self._floating_legend_overlay = _FloatingLegendOverlay(self._plot_widget)
         self._floating_legend_overlay.move(16, 16)
         self._floating_legend_overlay.stateChanged.connect(self.legendStateChanged.emit)
 
         self._plot_widget.installEventFilter(self)
+        self._plot_widget.viewport().setMouseTracking(True)
+        self._plot_widget.viewport().installEventFilter(self)
+        self._plot_widget.scene().sigMouseMoved.connect(self._handle_scene_mouse_moved)
         self._plot_widget.sigXRangeChanged.connect(self._handle_x_range_changed)
 
         self.show_empty(
@@ -706,12 +739,9 @@ class TrendPlotWidget(QWidget):
         self._data_x_range = None
         self._pending_x_range = None
         self._summary_label.setText(message)
+        self._clear_cursor_state()
 
-        plot_item = self._plot_widget.getPlotItem()
-        plot_item.clear()
-        plot_item.setTitle("")
-        plot_item.setLabel("left", "Value")
-        plot_item.setLabel("bottom", "Time")
+        self._reset_plot_item()
         self._floating_legend_overlay.set_entries([])
 
         self._set_navigation_enabled(False)
@@ -724,7 +754,8 @@ class TrendPlotWidget(QWidget):
         plotted_series: list[TrendPlotSeries],
     ) -> None:
         plot_item = self._plot_widget.getPlotItem()
-        plot_item.clear()
+        self._reset_plot_item()
+        self._clear_cursor_state()
 
         prepared_series: list[_PreparedTrendPlotSeries] = []
         x_min_values: list[float] = []
@@ -895,6 +926,11 @@ class TrendPlotWidget(QWidget):
         self.visibleRangeChanged.emit(x_min, x_max)
         self.visibleStatsChanged.emit(visible_stats)
 
+        if self._current_cursor_x is not None and x_min <= self._current_cursor_x <= x_max:
+            self._set_cursor_position(self._current_cursor_x)
+        else:
+            self._clear_cursor_state()
+
     def _apply_visible_y_range(
         self,
         y_min_values: list[float],
@@ -986,9 +1022,80 @@ class TrendPlotWidget(QWidget):
             preserved_y_range=current_y_range,
         )
 
+    def _reset_plot_item(self) -> None:
+        plot_item = self._plot_widget.getPlotItem()
+        plot_item.clear()
+        plot_item.setTitle("")
+        plot_item.setLabel("left", "Value")
+        plot_item.setLabel("bottom", "Time")
+        self._cursor_line.hide()
+        plot_item.addItem(self._cursor_line, ignoreBounds=True)
+
+    def _handle_scene_mouse_moved(self, scene_position: object) -> None:
+        if not self._prepared_series:
+            return
+
+        plot_item = self._plot_widget.getPlotItem()
+        view_box = plot_item.getViewBox()
+        if view_box is None or not view_box.sceneBoundingRect().contains(scene_position):
+            self._clear_cursor_state()
+            return
+
+        cursor_point = view_box.mapSceneToView(scene_position)
+        cursor_x = float(cursor_point.x())
+        if not np.isfinite(cursor_x):
+            self._clear_cursor_state()
+            return
+
+        self._set_cursor_position(cursor_x)
+
+    def _set_cursor_position(self, cursor_x: float) -> None:
+        self._current_cursor_x = cursor_x
+        self._cursor_line.setPos(cursor_x)
+        self._cursor_line.show()
+        self._cursor_label.setText(f"Cursor: {_format_timestamp(cursor_x)}")
+        self._cursor_label.show()
+        self.cursorStatsChanged.emit(self._build_cursor_stats(cursor_x))
+
+    def _clear_cursor_state(self) -> None:
+        self._current_cursor_x = None
+        self._cursor_line.hide()
+        self._cursor_label.clear()
+        self._cursor_label.hide()
+        self.cursorStatsChanged.emit(None)
+
+    def _build_cursor_stats(self, cursor_x: float) -> TrendCursorStats:
+        series_stats: list[TrendCursorSeriesStats] = []
+        for prepared in self._prepared_series:
+            nearest_index = _nearest_index(prepared.x_values, cursor_x)
+            sample_timestamp: float | None = None
+            cursor_value: float | None = None
+            if nearest_index is not None:
+                sample_timestamp = float(prepared.x_values[nearest_index])
+                value = float(prepared.y_values[nearest_index])
+                if np.isfinite(value):
+                    cursor_value = value
+
+            series_stats.append(
+                TrendCursorSeriesStats(
+                    tag_name=prepared.plotted.series.tag_name,
+                    sheet_name=prepared.plotted.sheet.name,
+                    color=prepared.color,
+                    sample_timestamp=sample_timestamp,
+                    cursor_value=cursor_value,
+                )
+            )
+
+        return TrendCursorStats(
+            cursor_timestamp=cursor_x,
+            series_stats=tuple(series_stats),
+        )
+
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         if watched is self._plot_widget and event.type() == QEvent.Resize:
             self._floating_legend_overlay.clamp_to_parent()
+        elif watched is self._plot_widget.viewport() and event.type() == QEvent.Leave:
+            self._clear_cursor_state()
         return super().eventFilter(watched, event)
 
 
@@ -1036,9 +1143,13 @@ def _summarize_tag_names(tag_names: list[str]) -> str:
 
 
 def _format_time_range(start_epoch: float, end_epoch: float) -> str:
-    start = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d %H:%M:%S")
-    end = datetime.fromtimestamp(end_epoch).strftime("%Y-%m-%d %H:%M:%S")
+    start = _format_timestamp(start_epoch)
+    end = _format_timestamp(end_epoch)
     return f"{start} to {end}"
+
+
+def _format_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _visible_index_bounds(
@@ -1081,6 +1192,24 @@ def _downsample_visible_slice(
     sampled_indices.append(x_values.size - 1)
     unique_indices = np.unique(np.asarray(sampled_indices, dtype=np.int64))
     return x_values[unique_indices], y_values[unique_indices]
+
+
+def _nearest_index(x_values: np.ndarray, target_x: float) -> int | None:
+    if x_values.size == 0:
+        return None
+
+    right_index = int(np.searchsorted(x_values, target_x, side="left"))
+    if right_index <= 0:
+        return 0
+    if right_index >= x_values.size:
+        return int(x_values.size - 1)
+
+    left_index = right_index - 1
+    left_distance = abs(float(x_values[left_index]) - target_x)
+    right_distance = abs(float(x_values[right_index]) - target_x)
+    if right_distance < left_distance:
+        return right_index
+    return left_index
 
 
 def _clamp_x_range(
