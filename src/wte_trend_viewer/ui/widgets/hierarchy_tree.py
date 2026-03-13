@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .imported_tag_list import SearchableImportedTagList
+from .imported_tag_list import SearchableImportedTagList, TAG_MIME_TYPE
 
 
 ITEM_KIND_ROLE = Qt.UserRole + 1
@@ -80,6 +80,13 @@ class SearchableHierarchyTree(QTreeWidget):
         *,
         emit_change: bool = True,
     ) -> QTreeWidgetItem:
+        existing_item = self._find_duplicate_tag(name, parent)
+        if existing_item is not None:
+            self.setCurrentItem(existing_item)
+            self.scrollToItem(existing_item)
+            self._expand_to_item(existing_item)
+            return existing_item
+
         item = QTreeWidgetItem([name])
         item.setData(0, ITEM_KIND_ROLE, TAG_ITEM_KIND)
         item.setFlags(
@@ -126,14 +133,26 @@ class SearchableHierarchyTree(QTreeWidget):
         self.structureChanged.emit()
         return True
 
+    def dragEnterEvent(self, event) -> None:
+        if self._is_imported_tag_drag(event):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if self._is_imported_tag_drag(event):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
     def dropEvent(self, event) -> None:
-        if isinstance(event.source(), SearchableImportedTagList) and event.mimeData().hasText():
+        if self._is_imported_tag_drag(event):
             target_parent = self._drop_target_group(event.position().toPoint())
-            tag_names = [
-                tag_name.strip()
-                for tag_name in event.mimeData().text().splitlines()
-                if tag_name.strip()
-            ]
+            tag_names = self._tag_names_from_mime(event.mimeData())
+            if not tag_names:
+                event.ignore()
+                return
+
             for tag_name in tag_names:
                 self.add_tag(tag_name, target_parent, emit_change=False)
             self.structureChanged.emit()
@@ -203,6 +222,52 @@ class SearchableHierarchyTree(QTreeWidget):
         if target.data(0, ITEM_KIND_ROLE) == GROUP_ITEM_KIND:
             return target
         return target.parent()
+
+    def _is_imported_tag_drag(self, event) -> bool:
+        source = event.source()
+        mime_data = event.mimeData()
+        return (
+            isinstance(source, SearchableImportedTagList)
+            and mime_data is not None
+            and (
+                mime_data.hasFormat(TAG_MIME_TYPE)
+                or mime_data.hasText()
+            )
+        )
+
+    def _tag_names_from_mime(self, mime_data) -> list[str]:
+        if mime_data.hasFormat(TAG_MIME_TYPE):
+            payload = bytes(mime_data.data(TAG_MIME_TYPE)).decode("utf-8", errors="ignore")
+            return [
+                tag_name.strip()
+                for tag_name in payload.splitlines()
+                if tag_name.strip()
+            ]
+
+        if mime_data.hasText():
+            return [
+                tag_name.strip()
+                for tag_name in mime_data.text().splitlines()
+                if tag_name.strip()
+            ]
+
+        return []
+
+    def _find_duplicate_tag(
+        self,
+        name: str,
+        parent: QTreeWidgetItem | None,
+    ) -> QTreeWidgetItem | None:
+        sibling_count = self.topLevelItemCount() if parent is None else parent.childCount()
+        for index in range(sibling_count):
+            item = self.topLevelItem(index) if parent is None else parent.child(index)
+            if item is None:
+                continue
+            if item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+                continue
+            if item.text(0) == name:
+                return item
+        return None
 
     def _clear_search_buffer(self) -> None:
         self._search_buffer = ""
