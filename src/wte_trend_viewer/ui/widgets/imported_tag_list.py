@@ -4,6 +4,9 @@ from PySide6.QtCore import QMimeData, QTimer, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QWidget
 
 
+TAG_MIME_TYPE = "application/x-wte-imported-tags"
+
+
 class SearchableImportedTagList(QListWidget):
     """Imported-tag list with copy-drag and type-to-search behavior."""
 
@@ -37,8 +40,10 @@ class SearchableImportedTagList(QListWidget):
         return [self.item(index).text() for index in range(self.count())]
 
     def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
+        tag_names = [item.text() for item in items if item.text()]
         mime_data = QMimeData()
-        mime_data.setText("\n".join(item.text() for item in items if item.text()))
+        mime_data.setText("\n".join(tag_names))
+        mime_data.setData(TAG_MIME_TYPE, "\n".join(tag_names).encode("utf-8"))
         return mime_data
 
     def supportedDragActions(self) -> Qt.DropActions:
