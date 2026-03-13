@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QPoint, QRect, QSignalBlocker, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QFrame,
@@ -80,8 +80,9 @@ class _PreparedTrendPlotSeries:
 class _FloatingLegendEntry(QFrame):
     MINIMUM_COLUMN_WIDTH = 190
     _BASE_HEIGHT = 28
-    _MIN_HEIGHT = 18
-    _MIN_SCALE = 0.72
+    _MIN_HEIGHT = 16
+    _MIN_SCALE = 0.58
+    _MIN_FONT_POINT_SIZE = 6.0
     _BASE_HORIZONTAL_MARGIN = 8
     _BASE_VERTICAL_MARGIN = 4
     _BASE_SPACING = 8
@@ -101,9 +102,9 @@ class _FloatingLegendEntry(QFrame):
         self._swatch.setStyleSheet(f"background-color: {color}; border: none;")
         self._layout.addWidget(self._swatch, alignment=Qt.AlignVCenter)
 
-        self._label = QLabel(text, self)
-        self._label.setToolTip(text)
+        self._label = _LegendEntryLabel(text, self)
         self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         self._layout.addWidget(self._label, stretch=1)
 
         label_font = self._label.font()
@@ -120,7 +121,6 @@ class _FloatingLegendEntry(QFrame):
         spacing = max(4, int(round(self._BASE_SPACING * scale)))
         swatch_width = max(10, int(round(self._BASE_SWATCH_WIDTH * scale)))
         swatch_height = max(2, int(round(self._BASE_SWATCH_HEIGHT * scale)))
-        row_height = max(self._MIN_HEIGHT, int(round(self._BASE_HEIGHT * scale)))
 
         self._layout.setContentsMargins(
             horizontal_margin,
@@ -132,10 +132,41 @@ class _FloatingLegendEntry(QFrame):
         self._swatch.setFixedSize(swatch_width, swatch_height)
 
         label_font = self._label.font()
-        label_font.setPointSizeF(self._base_font_point_size * scale)
+        label_font.setPointSizeF(
+            max(self._MIN_FONT_POINT_SIZE, self._base_font_point_size * scale)
+        )
         self._label.setFont(label_font)
+        self._label.refresh_text()
 
+        font_metrics = QFontMetrics(label_font)
+        row_height = max(
+            self._MIN_HEIGHT,
+            max(font_metrics.height(), swatch_height) + (vertical_margin * 2),
+        )
         self.setFixedHeight(row_height)
+
+
+class _LegendEntryLabel(QLabel):
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self.setToolTip(text)
+
+    def refresh_text(self) -> None:
+        available_width = max(0, self.contentsRect().width())
+        if available_width <= 0:
+            super().setText(self._full_text)
+            return
+        elided = self.fontMetrics().elidedText(
+            self._full_text,
+            Qt.ElideRight,
+            available_width,
+        )
+        super().setText(elided)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.refresh_text()
 
 
 class _WrappingLegendEntries(QWidget):
@@ -240,8 +271,8 @@ class _WrappingLegendEntries(QWidget):
 class _LegendResizeHandle(QWidget):
     dragged = Signal(int)
     dragFinished = Signal()
-    _IDLE_DIAMETER = 7
-    _ACTIVE_DIAMETER = 9
+    _IDLE_DIAMETER = 5
+    _ACTIVE_DIAMETER = 7
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -253,7 +284,7 @@ class _LegendResizeHandle(QWidget):
         self.setAttribute(Qt.WA_Hover, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self.setFixedSize(12, 12)
+        self.setFixedSize(10, 10)
         self.setCursor(
             Qt.SizeHorCursor if orientation == Qt.Horizontal else Qt.SizeVerCursor
         )
@@ -539,16 +570,15 @@ class _FloatingLegendOverlay(QFrame):
 
         self._width_handle.raise_()
         self._height_handle.raise_()
+        body_top = self._header.height()
+        body_height = max(0, self.height() - body_top)
         self._width_handle.move(
-            self.width() - self._width_handle.width() - 2,
-            max(
-                self._header.height() + 4,
-                (self.height() - self._width_handle.height()) // 2,
-            ),
+            self.width() - (self._width_handle.width() // 2),
+            body_top + max(0, (body_height - self._width_handle.height()) // 2),
         )
         self._height_handle.move(
             max(6, (self.width() - self._height_handle.width()) // 2),
-            self.height() - self._height_handle.height() - 2,
+            self.height() - (self._height_handle.height() // 2),
         )
 
     def _sync_entries_layout(self) -> None:
