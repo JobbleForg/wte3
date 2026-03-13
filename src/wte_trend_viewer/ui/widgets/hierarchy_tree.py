@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .imported_tag_list import SearchableImportedTagList, TAG_MIME_TYPE
+from .imported_tag_list import SearchableImportedTagList, TAG_MIME_TYPE, TAG_NAME_ROLE
 
 
 ITEM_KIND_ROLE = Qt.UserRole + 1
@@ -89,6 +89,7 @@ class SearchableHierarchyTree(QTreeWidget):
 
         item = QTreeWidgetItem([name])
         item.setData(0, ITEM_KIND_ROLE, TAG_ITEM_KIND)
+        item.setData(0, TAG_NAME_ROLE, name)
         item.setFlags(
             item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled
         )
@@ -112,11 +113,37 @@ class SearchableHierarchyTree(QTreeWidget):
         return current.parent()
 
     def selected_tag_names(self) -> list[str]:
-        return [
-            item.text(0)
-            for item in self.selectedItems()
-            if item.data(0, ITEM_KIND_ROLE) == TAG_ITEM_KIND
-        ]
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        iterator = QTreeWidgetItemIterator(self)
+        while iterator.value() is not None:
+            item = iterator.value()
+            if item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+                iterator += 1
+                continue
+
+            tag_name = self.tag_name(item)
+            if (
+                tag_name
+                and tag_name not in seen
+                and (item.isSelected() or self._has_selected_group_ancestor(item))
+            ):
+                selected.append(tag_name)
+                seen.add(tag_name)
+
+            iterator += 1
+
+        return selected
+
+    def tag_name(self, item: QTreeWidgetItem | None) -> str | None:
+        if item is None:
+            return None
+        value = item.data(0, TAG_NAME_ROLE)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        text = item.text(0).strip()
+        return text or None
 
     def remove_selected_item(self) -> bool:
         item = self.currentItem()
@@ -222,6 +249,17 @@ class SearchableHierarchyTree(QTreeWidget):
             parent.setExpanded(True)
             parent = parent.parent()
 
+    def _has_selected_group_ancestor(self, item: QTreeWidgetItem) -> bool:
+        parent = item.parent()
+        while parent is not None:
+            if (
+                parent.isSelected()
+                and parent.data(0, ITEM_KIND_ROLE) == GROUP_ITEM_KIND
+            ):
+                return True
+            parent = parent.parent()
+        return False
+
     def _drop_target_group(self, point) -> QTreeWidgetItem | None:
         target = self.itemAt(point)
         if target is None:
@@ -272,7 +310,7 @@ class SearchableHierarchyTree(QTreeWidget):
                 continue
             if item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
                 continue
-            if item.text(0) == name:
+            if self.tag_name(item) == name:
                 return item
         return None
 

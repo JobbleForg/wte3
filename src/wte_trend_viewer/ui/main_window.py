@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -25,14 +27,17 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QToolBar,
     QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
 
 from ..data_manager import LoadedTrendWorkbook, TrendDataManager
 from ..session import SessionStore, SessionTreeNode, WorkspaceSession
+from ..tag_units import normalize_unit_list, normalize_unit_text
 from ..workbook import WorkbookInspector
 from .dialogs.sheet_selection_dialog import SheetSelectionDialog
+from .dialogs.unit_manager_dialog import UnitManagerDialog
 from .widgets.hierarchy_tree import (
     GROUP_ITEM_KIND,
     ITEM_KIND_ROLE,
@@ -82,11 +87,21 @@ class TrendViewerMainWindow(QMainWindow):
         self._hierarchy_tree = SearchableHierarchyTree(self)
         self._hierarchy_tree.itemSelectionChanged.connect(self._handle_hierarchy_selection_changed)
         self._hierarchy_tree.structureChanged.connect(self._handle_workspace_changed)
+        self._hierarchy_tree.structureChanged.connect(self._refresh_tag_unit_presentations)
+        self._hierarchy_tree.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self._hierarchy_tree.viewport().customContextMenuRequested.connect(
+            self._show_hierarchy_tag_context_menu
+        )
 
         self._imported_tags_list = SearchableImportedTagList(self)
         self._imported_tags_list.tagsChanged.connect(self._handle_workspace_changed)
+        self._imported_tags_list.tagsChanged.connect(self._refresh_tag_unit_presentations)
         self._imported_tags_list.itemSelectionChanged.connect(
             self._handle_imported_tag_selection_changed
+        )
+        self._imported_tags_list.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self._imported_tags_list.viewport().customContextMenuRequested.connect(
+            self._show_imported_tag_context_menu
         )
 
         self._imported_count_label: QLabel | None = None
@@ -124,6 +139,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._imported_tags_list.set_tags(tags, emit_change=False)
         if self._imported_count_label is not None:
             self._imported_count_label.setText(f"{len(tags)} tags loaded")
+        self._refresh_tag_unit_presentations()
         if persist:
             self._handle_workspace_changed()
 
@@ -241,6 +257,17 @@ class TrendViewerMainWindow(QMainWindow):
 
         layout.addWidget(header)
         layout.addWidget(self._imported_tags_list, stretch=1)
+
+        footer = QWidget(panel)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.addStretch(1)
+
+        edit_units_button = QPushButton("Edit units", footer)
+        edit_units_button.clicked.connect(self._prompt_edit_units)
+        footer_layout.addWidget(edit_units_button)
+
+        layout.addWidget(footer)
         return panel
 
     def _build_main_workspace(self) -> QWidget:
@@ -290,9 +317,9 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._legend_table = QTableWidget(0, 4, container)
+        self._legend_table = QTableWidget(0, 5, container)
         self._legend_table.setHorizontalHeaderLabels(
-            ["Tag", "Sheet", "Low Range", "High Range"]
+            ["Tag", "Sheet", "Unit", "Low Range", "High Range"]
         )
         self._legend_table.verticalHeader().setVisible(False)
         self._legend_table.setAlternatingRowColors(True)
@@ -370,6 +397,176 @@ class TrendViewerMainWindow(QMainWindow):
         if persist:
             self._handle_workspace_changed()
 
+    def _stored_available_units(self) -> list[str]:
+        raw_units = self._session.settings_state.get("available_units")
+        units: list[str] = []
+        if isinstance(raw_units, list):
+            units = normalize_unit_list(raw_units)
+
+        tag_units = self._tag_units_state()
+        for assigned_unit in tag_units.values():
+            normalized_unit = normalize_unit_text(assigned_unit)
+            if normalized_unit is not None and normalized_unit.casefold() not in {
+                unit.casefold() for unit in units
+            }:
+                units.append(normalized_unit)
+        return units
+
+    def _set_available_units(self, units: list[str], *, persist: bool) -> None:
+        self._session.settings_state["available_units"] = normalize_unit_list(units)
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+
+    def _tag_units_state(self) -> dict[str, object]:
+        state = self._session.settings_state.get("tag_units")
+        if isinstance(state, dict):
+            return state
+        state = {}
+        self._session.settings_state["tag_units"] = state
+        return state
+
+    def _tag_custom_names_state(self) -> dict[str, object]:
+        state = self._session.settings_state.get("tag_custom_names")
+        if isinstance(state, dict):
+            return state
+        state = {}
+        self._session.settings_state["tag_custom_names"] = state
+        return state
+
+    def _unit_for_tag(self, tag_name: str) -> str | None:
+        value = self._tag_units_state().get(tag_name)
+        return normalize_unit_text(value)
+
+    def _custom_name_for_tag(self, tag_name: str) -> str | None:
+        value = self._tag_custom_names_state().get(tag_name)
+        return _normalize_custom_name_text(value)
+
+    def _set_custom_name_for_tag(
+        self,
+        tag_name: str,
+        custom_name: str,
+        *,
+        persist: bool,
+    ) -> None:
+        normalized_tag_name = tag_name.strip()
+        normalized_custom_name = _normalize_custom_name_text(custom_name)
+        if not normalized_tag_name or normalized_custom_name is None:
+            return
+
+        if normalized_custom_name.casefold() == normalized_tag_name.casefold():
+            self._clear_custom_name_for_tag(normalized_tag_name, persist=persist)
+            return
+
+        self._tag_custom_names_state()[normalized_tag_name] = normalized_custom_name
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+
+    def _clear_custom_name_for_tag(self, tag_name: str, *, persist: bool) -> bool:
+        normalized_tag_name = tag_name.strip()
+        if not normalized_tag_name:
+            return False
+
+        removed = self._tag_custom_names_state().pop(normalized_tag_name, None)
+        if removed is None:
+            return False
+
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+        return True
+
+    def _assign_unit_to_tags(
+        self,
+        tag_names: list[str],
+        unit: str,
+        *,
+        persist: bool,
+    ) -> None:
+        normalized_unit = normalize_unit_text(unit)
+        if normalized_unit is None:
+            return
+
+        tag_units = self._tag_units_state()
+        normalized_tag_names = [
+            tag_name.strip()
+            for tag_name in tag_names
+            if tag_name.strip()
+        ]
+        for tag_name in normalized_tag_names:
+            tag_units[tag_name] = normalized_unit
+
+        available_units = self._stored_available_units()
+        if normalized_unit.casefold() not in {value.casefold() for value in available_units}:
+            available_units.append(normalized_unit)
+            self._session.settings_state["available_units"] = available_units
+
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+
+    def _clear_unit_from_tags(self, tag_names: list[str], *, persist: bool) -> None:
+        tag_units = self._tag_units_state()
+        changed = False
+        for tag_name in tag_names:
+            normalized_tag_name = tag_name.strip()
+            if normalized_tag_name and normalized_tag_name in tag_units:
+                tag_units.pop(normalized_tag_name, None)
+                changed = True
+        if not changed:
+            return
+
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+
+    def _rename_available_unit(self, previous_unit: str, new_unit: str, *, persist: bool) -> None:
+        old_unit = normalize_unit_text(previous_unit)
+        renamed_unit = normalize_unit_text(new_unit)
+        if old_unit is None or renamed_unit is None:
+            return
+
+        available_units = [
+            renamed_unit if unit.casefold() == old_unit.casefold() else unit
+            for unit in self._stored_available_units()
+        ]
+        self._session.settings_state["available_units"] = normalize_unit_list(available_units)
+
+        tag_units = self._tag_units_state()
+        for tag_name, assigned_unit in list(tag_units.items()):
+            normalized_assigned_unit = normalize_unit_text(assigned_unit)
+            if normalized_assigned_unit is not None and normalized_assigned_unit.casefold() == old_unit.casefold():
+                tag_units[tag_name] = renamed_unit
+
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+
+    def _remove_available_unit(self, unit: str, *, persist: bool) -> int:
+        normalized_unit = normalize_unit_text(unit)
+        if normalized_unit is None:
+            return 0
+
+        self._session.settings_state["available_units"] = [
+            value
+            for value in self._stored_available_units()
+            if value.casefold() != normalized_unit.casefold()
+        ]
+
+        tag_units = self._tag_units_state()
+        removed_assignments = 0
+        for tag_name, assigned_unit in list(tag_units.items()):
+            normalized_assigned_unit = normalize_unit_text(assigned_unit)
+            if normalized_assigned_unit is not None and normalized_assigned_unit.casefold() == normalized_unit.casefold():
+                tag_units.pop(tag_name, None)
+                removed_assignments += 1
+
+        self._refresh_tag_unit_presentations()
+        if persist:
+            self._handle_workspace_changed()
+        return removed_assignments
+
     def _add_time_preset(self) -> None:
         value, accepted = QInputDialog.getText(
             self,
@@ -431,6 +628,200 @@ class TrendViewerMainWindow(QMainWindow):
         presets = [preset for preset in self._stored_time_presets() if preset != selected_text]
         self._set_time_presets(presets, persist=True)
         self.statusBar().showMessage(f"Removed time preset: {selected_text}", 3000)
+
+    def _prompt_edit_units(self) -> None:
+        dialog = UnitManagerDialog(self._stored_available_units(), parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        renamed_units = dialog.renamed_units()
+        removed_units = dialog.removed_units()
+        self._session.settings_state["available_units"] = dialog.units()
+
+        for previous_unit, new_unit in renamed_units.items():
+            self._rename_available_unit(previous_unit, new_unit, persist=False)
+        for unit in removed_units:
+            self._remove_available_unit(unit, persist=False)
+
+        self._session.settings_state["available_units"] = normalize_unit_list(dialog.units())
+        self._refresh_tag_unit_presentations()
+        self._handle_workspace_changed()
+        self.statusBar().showMessage("Updated unit library.", 3000)
+
+    def _show_imported_tag_context_menu(self, position) -> None:
+        item = self._imported_tags_list.itemAt(position)
+        if item is None:
+            return
+
+        clicked_tag_name = self._imported_tags_list.tag_name_for_item(item)
+        if clicked_tag_name is None:
+            return
+
+        unit_target_tag_names = (
+            self._selected_imported_tag_names()
+            if item.isSelected()
+            else [clicked_tag_name]
+        )
+        self._show_tag_context_menu(
+            clicked_tag_name=clicked_tag_name,
+            unit_target_tag_names=unit_target_tag_names,
+            global_pos=self._imported_tags_list.viewport().mapToGlobal(position),
+        )
+
+    def _show_hierarchy_tag_context_menu(self, position) -> None:
+        item = self._hierarchy_tree.itemAt(position)
+        if item is None or item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+            return
+
+        clicked_tag_name = self._hierarchy_tree.tag_name(item)
+        if clicked_tag_name is None:
+            return
+
+        unit_target_tag_names = (
+            self._selected_direct_hierarchy_tag_names()
+            if item.isSelected()
+            else [clicked_tag_name]
+        )
+        self._show_tag_context_menu(
+            clicked_tag_name=clicked_tag_name,
+            unit_target_tag_names=unit_target_tag_names,
+            global_pos=self._hierarchy_tree.viewport().mapToGlobal(position),
+        )
+
+    def _show_tag_context_menu(
+        self,
+        *,
+        clicked_tag_name: str,
+        unit_target_tag_names: list[str],
+        global_pos,
+    ) -> None:
+        normalized_tag_name = clicked_tag_name.strip()
+        normalized_unit_target_tag_names = _normalize_tag_names(unit_target_tag_names)
+        if not normalized_tag_name or not normalized_unit_target_tag_names:
+            return
+
+        menu = QMenu(self)
+        custom_name = self._custom_name_for_tag(normalized_tag_name)
+        if custom_name is None:
+            add_custom_name_action = menu.addAction("Add custom name...")
+            edit_custom_name_action = None
+            remove_custom_name_action = None
+        else:
+            add_custom_name_action = None
+            edit_custom_name_action = menu.addAction("Edit custom name...")
+            remove_custom_name_action = menu.addAction("Remove custom name")
+        menu.addSeparator()
+
+        assign_unit_menu = menu.addMenu("Assign unit")
+        add_unit_action, clear_unit_action, unit_actions = self._populate_assign_unit_menu(
+            assign_unit_menu,
+            normalized_unit_target_tag_names,
+        )
+
+        chosen_action = menu.exec(global_pos)
+        if chosen_action is None:
+            return
+        if chosen_action is add_custom_name_action or chosen_action is edit_custom_name_action:
+            self._prompt_custom_name_for_tag(normalized_tag_name)
+            return
+        if chosen_action is remove_custom_name_action:
+            if self._clear_custom_name_for_tag(normalized_tag_name, persist=True):
+                self.statusBar().showMessage(
+                    f"Removed custom name for {normalized_tag_name}.",
+                    3000,
+                )
+            return
+        if chosen_action is add_unit_action:
+            self._prompt_add_unit_for_tags(normalized_unit_target_tag_names)
+            return
+        if chosen_action is clear_unit_action:
+            self._clear_unit_from_tags(normalized_unit_target_tag_names, persist=True)
+            self.statusBar().showMessage(
+                f"Cleared unit for {len(normalized_unit_target_tag_names)} tag(s).",
+                3000,
+            )
+            return
+        if chosen_action in unit_actions:
+            selected_unit = unit_actions[chosen_action]
+            self._assign_unit_to_tags(
+                normalized_unit_target_tag_names,
+                selected_unit,
+                persist=True,
+            )
+            self.statusBar().showMessage(
+                f"Assigned {selected_unit} to {len(normalized_unit_target_tag_names)} tag(s).",
+                3000,
+            )
+
+    def _populate_assign_unit_menu(
+        self,
+        menu: QMenu,
+        tag_names: list[str],
+    ) -> tuple[object, object, dict[object, str]]:
+        normalized_tag_names = _normalize_tag_names(tag_names)
+
+        available_units = self._stored_available_units()
+        add_unit_action = menu.addAction("Add unit...")
+        clear_unit_action = menu.addAction("Clear unit")
+        if available_units:
+            menu.addSeparator()
+
+        current_units = {
+            self._unit_for_tag(tag_name)
+            for tag_name in normalized_tag_names
+            if self._unit_for_tag(tag_name) is not None
+        }
+        common_unit = next(iter(current_units)) if len(current_units) == 1 else None
+
+        unit_actions: dict[object, str] = {}
+        for unit in available_units:
+            action = menu.addAction(unit)
+            action.setCheckable(True)
+            action.setChecked(unit == common_unit)
+            unit_actions[action] = unit
+        return add_unit_action, clear_unit_action, unit_actions
+
+    def _prompt_custom_name_for_tag(self, tag_name: str) -> None:
+        current_custom_name = self._custom_name_for_tag(tag_name) or ""
+        value, accepted = QInputDialog.getText(
+            self,
+            "Custom Tag Name",
+            f"Custom name for {tag_name}:",
+            text=current_custom_name,
+        )
+        if not accepted:
+            return
+
+        custom_name = _normalize_custom_name_text(value)
+        if custom_name is None:
+            self.statusBar().showMessage("Enter a non-empty custom name.", 4000)
+            return
+
+        self._set_custom_name_for_tag(tag_name, custom_name, persist=True)
+        self.statusBar().showMessage(
+            f"Saved custom name for {tag_name}.",
+            3000,
+        )
+
+    def _prompt_add_unit_for_tags(self, tag_names: list[str]) -> None:
+        value, accepted = QInputDialog.getText(
+            self,
+            "Add Unit",
+            "Unit (for example [m3/hr] or [C]):",
+        )
+        if not accepted:
+            return
+
+        unit = normalize_unit_text(value)
+        if unit is None:
+            self.statusBar().showMessage("Enter a non-empty unit.", 4000)
+            return
+
+        self._assign_unit_to_tags(tag_names, unit, persist=True)
+        self.statusBar().showMessage(
+            f"Assigned {unit} to {len(tag_names)} tag(s).",
+            3000,
+        )
 
     def _build_analytics_tab(self) -> QWidget:
         container = QWidget(self)
@@ -709,6 +1100,7 @@ class TrendViewerMainWindow(QMainWindow):
         finally:
             self._suspend_session_updates = False
 
+        self._refresh_tag_unit_presentations()
         self._sync_workbook_actions()
         self._sync_subcategory_button_state()
 
@@ -818,11 +1210,15 @@ class TrendViewerMainWindow(QMainWindow):
         if kind not in {GROUP_ITEM_KIND, TAG_ITEM_KIND}:
             kind = GROUP_ITEM_KIND
 
+        if kind == TAG_ITEM_KIND:
+            node_name = self._hierarchy_tree.tag_name(item) or item.text(0)
+        else:
+            node_name = item.text(0)
         children = [
             self._snapshot_tree_item(item.child(index))
             for index in range(item.childCount())
         ]
-        return SessionTreeNode(name=item.text(0), kind=kind, children=children)
+        return SessionTreeNode(name=node_name, kind=kind, children=children)
 
     def _persist_last_session(self, *, show_errors: bool) -> None:
         try:
@@ -946,10 +1342,9 @@ class TrendViewerMainWindow(QMainWindow):
             selection_model = self._imported_tags_list.selectionModel()
             first_selected_item = None
             for tag_name in target_tag_names:
-                matching_items = self._imported_tags_list.findItems(tag_name, Qt.MatchExactly)
-                if not matching_items:
+                item = self._imported_tags_list.find_item_by_tag_name(tag_name)
+                if item is None:
                     continue
-                item = matching_items[0]
                 if first_selected_item is None:
                     first_selected_item = item
                 index = self._imported_tags_list.indexFromItem(item)
@@ -975,13 +1370,28 @@ class TrendViewerMainWindow(QMainWindow):
             return [legacy_value.strip()]
         return []
 
-    def _display_ranges_state(self) -> dict[str, object]:
+    def _legacy_display_ranges_state(self) -> dict[str, object]:
         ranges = self._session.trend_state.get("display_ranges")
         if isinstance(ranges, dict):
             return ranges
         ranges = {}
         self._session.trend_state["display_ranges"] = ranges
         return ranges
+
+    def _selection_display_ranges_state(self) -> dict[str, object]:
+        ranges = self._session.trend_state.get("display_ranges_by_selection")
+        if isinstance(ranges, dict):
+            return ranges
+        ranges = {}
+        self._session.trend_state["display_ranges_by_selection"] = ranges
+        return ranges
+
+    def _display_range_selection_key(self, tag_names: list[str] | None = None) -> str | None:
+        normalized_tag_names = _normalize_tag_names(tag_names or self._current_preview_tag_names)
+        if not normalized_tag_names:
+            return None
+        sorted_tag_names = sorted(normalized_tag_names, key=str.casefold)
+        return json.dumps(sorted_tag_names, ensure_ascii=True, separators=(",", ":"))
 
     def _resolved_display_range(self, plotted: TrendPlotSeries) -> tuple[float, float]:
         stored = self._stored_display_range(plotted.series.tag_name)
@@ -999,29 +1409,120 @@ class TrendViewerMainWindow(QMainWindow):
         return 0.0, 1.0
 
     def _stored_display_range(self, tag_name: str) -> tuple[float, float] | None:
-        entry = self._display_ranges_state().get(tag_name)
-        if not isinstance(entry, dict):
-            return None
+        selection_key = self._display_range_selection_key()
+        if selection_key is not None:
+            selection_ranges = self._selection_display_ranges_state().get(selection_key)
+            if isinstance(selection_ranges, dict):
+                stored = _coerce_display_range_entry(selection_ranges.get(tag_name))
+                if stored is not None:
+                    return stored
 
-        low_range = _coerce_float(entry.get("low"))
-        high_range = _coerce_float(entry.get("high"))
-        if low_range is None or high_range is None or low_range >= high_range:
-            return None
-        return low_range, high_range
+        return _coerce_display_range_entry(self._legacy_display_ranges_state().get(tag_name))
 
     def _set_display_range(self, tag_name: str, low_range: float, high_range: float) -> None:
-        self._display_ranges_state()[tag_name] = {
+        display_range_entry = {
             "low": float(low_range),
             "high": float(high_range),
         }
+        self._legacy_display_ranges_state()[tag_name] = dict(display_range_entry)
+
+        selection_key = self._display_range_selection_key()
+        if selection_key is None:
+            return
+
+        selection_ranges = self._selection_display_ranges_state().get(selection_key)
+        if not isinstance(selection_ranges, dict):
+            selection_ranges = {}
+            self._selection_display_ranges_state()[selection_key] = selection_ranges
+        selection_ranges[tag_name] = dict(display_range_entry)
 
     def _selected_imported_tag_names(self) -> list[str]:
         selected: list[str] = []
         for index in range(self._imported_tags_list.count()):
             item = self._imported_tags_list.item(index)
-            if item is not None and item.isSelected():
-                selected.append(item.text())
+            tag_name = self._imported_tags_list.tag_name_for_item(item)
+            if item is not None and item.isSelected() and tag_name is not None:
+                selected.append(tag_name)
         return selected
+
+    def _selected_direct_hierarchy_tag_names(self) -> list[str]:
+        selected: list[str] = []
+        seen: set[str] = set()
+        for item in self._hierarchy_tree.selectedItems():
+            if item.data(0, ITEM_KIND_ROLE) != TAG_ITEM_KIND:
+                continue
+            tag_name = self._hierarchy_tree.tag_name(item)
+            if tag_name and tag_name not in seen:
+                selected.append(tag_name)
+                seen.add(tag_name)
+        return selected
+
+    def _refresh_tag_unit_presentations(self) -> None:
+        self._refresh_imported_tag_unit_tooltips()
+        self._refresh_hierarchy_tag_unit_tooltips()
+        self._update_plot_support_panels(self._current_plotted_series)
+
+    def _refresh_imported_tag_unit_tooltips(self) -> None:
+        for index in range(self._imported_tags_list.count()):
+            item = self._imported_tags_list.item(index)
+            if item is None:
+                continue
+            tag_name = self._imported_tags_list.tag_name_for_item(item)
+            if tag_name is None:
+                continue
+            item.setText(self._imported_tag_display_text(tag_name))
+            item.setToolTip(self._tag_tooltip_text(tag_name))
+
+    def _refresh_hierarchy_tag_unit_tooltips(self) -> None:
+        iterator = QTreeWidgetItemIterator(self._hierarchy_tree)
+        while iterator.value() is not None:
+            item = iterator.value()
+            if item.data(0, ITEM_KIND_ROLE) == TAG_ITEM_KIND:
+                tag_name = self._hierarchy_tree.tag_name(item)
+                if tag_name is not None:
+                    item.setText(0, self._hierarchy_tag_display_text(tag_name))
+                    item.setToolTip(0, self._tag_tooltip_text(tag_name))
+            iterator += 1
+
+    def _tag_tooltip_text(self, tag_name: str) -> str:
+        normalized_tag_name = tag_name.strip()
+        if not normalized_tag_name:
+            return ""
+
+        lines = [f"Original: {normalized_tag_name}"]
+        custom_name = self._custom_name_for_tag(normalized_tag_name)
+        if custom_name is not None:
+            lines.insert(0, f"Custom: {custom_name}")
+        unit = self._unit_for_tag(normalized_tag_name)
+        if unit is not None:
+            lines.append(f"Unit: {unit}")
+        return "\n".join(lines)
+
+    def _imported_tag_display_text(self, tag_name: str) -> str:
+        custom_name = self._custom_name_for_tag(tag_name)
+        unit = self._unit_for_tag(tag_name)
+        if custom_name is None and unit is None:
+            return tag_name
+
+        parts: list[str] = []
+        if custom_name is not None:
+            parts.append(custom_name)
+            parts.append(tag_name)
+        else:
+            parts.append(tag_name)
+        if unit is not None:
+            parts.append(unit)
+        return " | ".join(parts)
+
+    def _hierarchy_tag_display_text(self, tag_name: str) -> str:
+        label = self._custom_name_for_tag(tag_name) or tag_name
+        unit = self._unit_for_tag(tag_name)
+        if unit is None:
+            return label
+        return f"{label} {unit}"
+
+    def _display_label_for_tag(self, tag_name: str) -> str:
+        return self._custom_name_for_tag(tag_name) or tag_name
 
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
         self._update_legend_table(plotted_series)
@@ -1060,10 +1561,12 @@ class TrendViewerMainWindow(QMainWindow):
             for row_index, plotted in enumerate(plotted_series):
                 color = QColor(PLOT_COLORS[row_index % len(PLOT_COLORS)])
                 low_range, high_range = self._resolved_display_range(plotted)
+                tooltip = self._tag_tooltip_text(plotted.series.tag_name)
 
-                tag_item = QTableWidgetItem(plotted.series.tag_name)
+                tag_item = QTableWidgetItem(self._display_label_for_tag(plotted.series.tag_name))
                 tag_item.setData(Qt.UserRole, plotted.series.tag_name)
                 tag_item.setForeground(color)
+                tag_item.setToolTip(tooltip)
                 tag_item.setFlags(tag_item.flags() & ~Qt.ItemIsEditable)
                 self._legend_table.insertRow(row_index)
                 self._legend_table.setItem(row_index, 0, tag_item)
@@ -1073,29 +1576,35 @@ class TrendViewerMainWindow(QMainWindow):
                 sheet_item.setFlags(sheet_item.flags() & ~Qt.ItemIsEditable)
                 self._legend_table.setItem(row_index, 1, sheet_item)
 
+                unit_item = QTableWidgetItem(self._unit_for_tag(plotted.series.tag_name) or "-")
+                unit_item.setForeground(color)
+                unit_item.setToolTip(tooltip)
+                unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 2, unit_item)
+
                 low_item = QTableWidgetItem(_format_range_value(low_range))
                 low_item.setForeground(color)
                 low_item.setData(Qt.UserRole, plotted.series.tag_name)
-                self._legend_table.setItem(row_index, 2, low_item)
+                self._legend_table.setItem(row_index, 3, low_item)
 
                 high_item = QTableWidgetItem(_format_range_value(high_range))
                 high_item.setForeground(color)
                 high_item.setData(Qt.UserRole, plotted.series.tag_name)
-                self._legend_table.setItem(row_index, 3, high_item)
+                self._legend_table.setItem(row_index, 4, high_item)
         finally:
             self._suspend_legend_table_updates = False
 
         self._legend_table.resizeColumnsToContents()
 
     def _handle_legend_table_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._suspend_legend_table_updates or item.column() not in {2, 3}:
+        if self._suspend_legend_table_updates or item.column() not in {3, 4}:
             return
         if self._legend_table is None:
             return
 
         tag_item = self._legend_table.item(item.row(), 0)
-        low_item = self._legend_table.item(item.row(), 2)
-        high_item = self._legend_table.item(item.row(), 3)
+        low_item = self._legend_table.item(item.row(), 3)
+        high_item = self._legend_table.item(item.row(), 4)
         if tag_item is None or low_item is None or high_item is None:
             return
 
@@ -1135,8 +1644,8 @@ class TrendViewerMainWindow(QMainWindow):
         if self._legend_table is None:
             return
 
-        low_item = self._legend_table.item(row_index, 2)
-        high_item = self._legend_table.item(row_index, 3)
+        low_item = self._legend_table.item(row_index, 3)
+        high_item = self._legend_table.item(row_index, 4)
         if low_item is None or high_item is None:
             return
 
@@ -1167,7 +1676,9 @@ class TrendViewerMainWindow(QMainWindow):
         for row_index, stats in enumerate(self._current_visible_stats):
             self._analytics_table.insertRow(row_index)
             cursor_stats = cursor_stats_by_tag.get(stats.tag_name)
-            self._analytics_table.setItem(row_index, 0, QTableWidgetItem(stats.tag_name))
+            tag_item = QTableWidgetItem(self._display_label_for_tag(stats.tag_name))
+            tag_item.setToolTip(self._tag_tooltip_text(stats.tag_name))
+            self._analytics_table.setItem(row_index, 0, tag_item)
             self._analytics_table.setItem(
                 row_index,
                 1,
@@ -1263,6 +1774,17 @@ def _coerce_float(value: object) -> float | None:
         return None
 
 
+def _coerce_display_range_entry(entry: object) -> tuple[float, float] | None:
+    if not isinstance(entry, dict):
+        return None
+
+    low_range = _coerce_float(entry.get("low"))
+    high_range = _coerce_float(entry.get("high"))
+    if low_range is None or high_range is None or low_range >= high_range:
+        return None
+    return low_range, high_range
+
+
 def _normalize_display_range(
     minimum_value: float | None,
     maximum_value: float | None,
@@ -1281,6 +1803,25 @@ def _normalize_time_preset_input(value: str) -> str | None:
         return None
     normalized_values = normalize_duration_presets([value])
     return normalized_values[0] if normalized_values else None
+
+
+def _normalize_tag_names(tag_names: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tag_name in tag_names:
+        value = str(tag_name).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _normalize_custom_name_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _format_range_value(value: float) -> str:

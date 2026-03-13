@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, Q
 
 
 TAG_MIME_TYPE = "application/x-wte-imported-tags"
+TAG_NAME_ROLE = Qt.UserRole + 2
 
 
 class SearchableImportedTagList(QListWidget):
@@ -31,16 +32,48 @@ class SearchableImportedTagList(QListWidget):
         self.clear()
         for tag_name in sorted(set(tags), key=str.casefold):
             item = QListWidgetItem(tag_name)
+            item.setData(TAG_NAME_ROLE, tag_name)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
             self.addItem(item)
         if emit_change:
             self.tagsChanged.emit()
 
     def tags(self) -> list[str]:
-        return [self.item(index).text() for index in range(self.count())]
+        tags: list[str] = []
+        for index in range(self.count()):
+            item = self.item(index)
+            tag_name = self.tag_name_for_item(item)
+            if tag_name is not None:
+                tags.append(tag_name)
+        return tags
+
+    def tag_name_for_item(self, item: QListWidgetItem | None) -> str | None:
+        if item is None:
+            return None
+        value = item.data(TAG_NAME_ROLE)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        text = item.text().strip()
+        return text or None
+
+    def find_item_by_tag_name(self, tag_name: str) -> QListWidgetItem | None:
+        target = tag_name.strip()
+        if not target:
+            return None
+
+        for index in range(self.count()):
+            item = self.item(index)
+            if self.tag_name_for_item(item) == target:
+                return item
+        return None
 
     def mimeData(self, items: list[QListWidgetItem]) -> QMimeData:
-        tag_names = [item.text() for item in items if item.text()]
+        tag_names = [
+            tag_name
+            for item in items
+            for tag_name in [self.tag_name_for_item(item)]
+            if tag_name is not None
+        ]
         mime_data = QMimeData()
         mime_data.setText("\n".join(tag_names))
         mime_data.setData(TAG_MIME_TYPE, "\n".join(tag_names).encode("utf-8"))
