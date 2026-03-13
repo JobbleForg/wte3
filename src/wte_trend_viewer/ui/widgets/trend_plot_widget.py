@@ -63,27 +63,64 @@ class _PreparedTrendPlotSeries:
 
 
 class _FloatingLegendEntry(QFrame):
-    MINIMUM_COLUMN_WIDTH = 220
+    MINIMUM_COLUMN_WIDTH = 190
+    _BASE_HEIGHT = 28
+    _MIN_HEIGHT = 18
+    _MIN_SCALE = 0.72
+    _BASE_HORIZONTAL_MARGIN = 8
+    _BASE_VERTICAL_MARGIN = 4
+    _BASE_SPACING = 8
+    _BASE_SWATCH_WIDTH = 18
+    _BASE_SWATCH_HEIGHT = 4
 
     def __init__(self, text: str, color: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("floatingLegendEntry")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumWidth(self.MINIMUM_COLUMN_WIDTH)
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(8)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(8, 4, 8, 4)
+        self._layout.setSpacing(8)
 
-        swatch = QFrame(self)
-        swatch.setFixedSize(18, 4)
-        swatch.setStyleSheet(f"background-color: {color}; border: none;")
-        layout.addWidget(swatch, alignment=Qt.AlignVCenter)
+        self._swatch = QFrame(self)
+        self._swatch.setStyleSheet(f"background-color: {color}; border: none;")
+        self._layout.addWidget(self._swatch, alignment=Qt.AlignVCenter)
 
-        label = QLabel(text, self)
-        label.setToolTip(text)
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout.addWidget(label, stretch=1)
+        self._label = QLabel(text, self)
+        self._label.setToolTip(text)
+        self._label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._layout.addWidget(self._label, stretch=1)
+
+        label_font = self._label.font()
+        self._base_font_point_size = label_font.pointSizeF()
+        if self._base_font_point_size <= 0:
+            self._base_font_point_size = float(label_font.pointSize() or 10)
+
+        self.set_scale(1.0)
+
+    def set_scale(self, scale: float) -> None:
+        scale = max(self._MIN_SCALE, min(scale, 1.0))
+        horizontal_margin = max(5, int(round(self._BASE_HORIZONTAL_MARGIN * scale)))
+        vertical_margin = max(2, int(round(self._BASE_VERTICAL_MARGIN * scale)))
+        spacing = max(4, int(round(self._BASE_SPACING * scale)))
+        swatch_width = max(10, int(round(self._BASE_SWATCH_WIDTH * scale)))
+        swatch_height = max(2, int(round(self._BASE_SWATCH_HEIGHT * scale)))
+        row_height = max(self._MIN_HEIGHT, int(round(self._BASE_HEIGHT * scale)))
+
+        self._layout.setContentsMargins(
+            horizontal_margin,
+            vertical_margin,
+            horizontal_margin,
+            vertical_margin,
+        )
+        self._layout.setSpacing(spacing)
+        self._swatch.setFixedSize(swatch_width, swatch_height)
+
+        label_font = self._label.font()
+        label_font.setPointSizeF(self._base_font_point_size * scale)
+        self._label.setFont(label_font)
+
+        self.setFixedHeight(row_height)
 
 
 class _WrappingLegendEntries(QWidget):
@@ -93,6 +130,11 @@ class _WrappingLegendEntries(QWidget):
         super().__init__(parent)
         self._entries: list[_FloatingLegendEntry] = []
         self._column_count = 0
+        self._row_count = 0
+        self._available_width = 0
+        self._available_height = 0
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         self._layout = QGridLayout(self)
         self._layout.setContentsMargins(6, 6, 6, 6)
@@ -111,27 +153,62 @@ class _WrappingLegendEntries(QWidget):
             for color, text in entries
         ]
         self._column_count = 0
+        self._row_count = 0
+        self._rebuild_layout()
+
+    def update_available_size(self, width: int, height: int) -> None:
+        self._available_width = max(1, int(width))
+        self._available_height = max(1, int(height))
         self._rebuild_layout()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if self._available_width <= 0:
+            self._available_width = max(1, self.contentsRect().width())
+        if self._available_height <= 0:
+            self._available_height = max(1, self.contentsRect().height())
         self._rebuild_layout()
 
     def _rebuild_layout(self) -> None:
         if not self._entries:
+            self._column_count = 0
+            self._row_count = 0
             self.setMinimumHeight(0)
             return
 
-        available_width = max(1, self.contentsRect().width())
-        spacing = self._layout.horizontalSpacing()
-        target_column_width = self.MINIMUM_COLUMN_WIDTH + spacing
-        column_count = max(1, available_width // target_column_width)
-        if column_count == self._column_count and self._layout.count() == len(self._entries):
-            return
+        contents_margins = self._layout.contentsMargins()
+        available_width = max(1, self._available_width or self.contentsRect().width())
+        available_height = max(1, self._available_height or self.contentsRect().height())
+        horizontal_spacing = max(0, self._layout.horizontalSpacing())
+        vertical_spacing = max(0, self._layout.verticalSpacing())
+        content_width = max(
+            1,
+            available_width - contents_margins.left() - contents_margins.right(),
+        )
+        target_column_width = self.MINIMUM_COLUMN_WIDTH + horizontal_spacing
+        column_count = max(1, (content_width + horizontal_spacing) // target_column_width)
+        row_count = max(1, (len(self._entries) + column_count - 1) // column_count)
+        content_height = max(
+            1,
+            available_height - contents_margins.top() - contents_margins.bottom(),
+        )
+        available_row_height = (
+            content_height - (max(0, row_count - 1) * vertical_spacing)
+        ) / row_count
+        scale = min(1.0, available_row_height / _FloatingLegendEntry._BASE_HEIGHT)
 
+        for entry in self._entries:
+            entry.set_scale(scale)
+
+        previous_column_count = self._column_count
         self._column_count = column_count
+        self._row_count = row_count
         while self._layout.count():
             self._layout.takeAt(0)
+
+        reset_count = max(previous_column_count, column_count) + 2
+        for column_index in range(reset_count):
+            self._layout.setColumnStretch(column_index, 0)
 
         for column_index in range(column_count):
             self._layout.setColumnStretch(column_index, 1)
@@ -148,6 +225,8 @@ class _WrappingLegendEntries(QWidget):
 class _LegendResizeHandle(QWidget):
     dragged = Signal(int)
     dragFinished = Signal()
+    _IDLE_DIAMETER = 7
+    _ACTIVE_DIAMETER = 9
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -159,7 +238,7 @@ class _LegendResizeHandle(QWidget):
         self.setAttribute(Qt.WA_Hover, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self.setFixedSize(22, 22)
+        self.setFixedSize(12, 12)
         self.setCursor(
             Qt.SizeHorCursor if orientation == Qt.Horizontal else Qt.SizeVerCursor
         )
@@ -209,14 +288,12 @@ class _LegendResizeHandle(QWidget):
 
     def paintEvent(self, event) -> None:
         del event
-        diameter = 14
-        if self._hovered or self._pressed:
-            diameter = 18
+        diameter = self._ACTIVE_DIAMETER if self._hovered or self._pressed else self._IDLE_DIAMETER
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        fill_color = QColor("#8FB7DA" if self._hovered or self._pressed else "#5C7892")
-        border_color = QColor("#D8DFE6" if self._pressed else "#9FB4C6")
+        fill_color = QColor("#8BA7C2" if self._hovered or self._pressed else "#576C80")
+        border_color = QColor("#C7D4DE" if self._pressed else "#91A5B7")
         painter.setPen(border_color)
         painter.setBrush(fill_color)
         x_pos = (self.width() - diameter) / 2
@@ -290,6 +367,7 @@ class _FloatingLegendOverlay(QFrame):
         if entries:
             self.show()
             self.raise_()
+            self._sync_entries_layout()
             self._update_resize_handles()
             self.clamp_to_parent()
         else:
@@ -365,6 +443,7 @@ class _FloatingLegendOverlay(QFrame):
 
         self._update_resize_handles()
         self.clamp_to_parent()
+        self._sync_entries_layout()
 
     def toggle_minimized(self) -> None:
         self.set_minimized(not self._minimized)
@@ -378,6 +457,7 @@ class _FloatingLegendOverlay(QFrame):
         super().resizeEvent(event)
         if not self._minimized:
             self._expanded_size = self._clamp_size(self.width(), self.height())
+            self._sync_entries_layout()
         self._update_resize_handles()
 
     def mousePressEvent(self, event) -> None:
@@ -445,15 +525,23 @@ class _FloatingLegendOverlay(QFrame):
         self._width_handle.raise_()
         self._height_handle.raise_()
         self._width_handle.move(
-            self.width() - self._width_handle.width() - 4,
+            self.width() - self._width_handle.width() - 2,
             max(
-                self._header.height() + 8,
+                self._header.height() + 4,
                 (self.height() - self._width_handle.height()) // 2,
             ),
         )
         self._height_handle.move(
-            max(8, (self.width() - self._height_handle.width()) // 2),
-            self.height() - self._height_handle.height() - 4,
+            max(6, (self.width() - self._height_handle.width()) // 2),
+            self.height() - self._height_handle.height() - 2,
+        )
+
+    def _sync_entries_layout(self) -> None:
+        if self._minimized:
+            return
+        self._entries_container.update_available_size(
+            self._scroll_area.viewport().width(),
+            self._scroll_area.viewport().height(),
         )
 
     def _clamp_size(self, width: int, height: int):
