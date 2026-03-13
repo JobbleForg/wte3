@@ -5,8 +5,21 @@ from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QPoint, QRect, QSignalBlocker, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ...data_manager import TrendSeriesData, TrendSheetData
 
@@ -49,11 +62,447 @@ class _PreparedTrendPlotSeries:
     curve: object
 
 
+class _FloatingLegendEntry(QFrame):
+    MINIMUM_COLUMN_WIDTH = 220
+
+    def __init__(self, text: str, color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("floatingLegendEntry")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumWidth(self.MINIMUM_COLUMN_WIDTH)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        swatch = QFrame(self)
+        swatch.setFixedSize(18, 4)
+        swatch.setStyleSheet(f"background-color: {color}; border: none;")
+        layout.addWidget(swatch, alignment=Qt.AlignVCenter)
+
+        label = QLabel(text, self)
+        label.setToolTip(text)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(label, stretch=1)
+
+
+class _WrappingLegendEntries(QWidget):
+    MINIMUM_COLUMN_WIDTH = _FloatingLegendEntry.MINIMUM_COLUMN_WIDTH
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._entries: list[_FloatingLegendEntry] = []
+        self._column_count = 0
+
+        self._layout = QGridLayout(self)
+        self._layout.setContentsMargins(6, 6, 6, 6)
+        self._layout.setHorizontalSpacing(6)
+        self._layout.setVerticalSpacing(4)
+
+    def set_entries(self, entries: list[tuple[str, str]]) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._entries = [
+            _FloatingLegendEntry(text, color, self)
+            for color, text in entries
+        ]
+        self._column_count = 0
+        self._rebuild_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rebuild_layout()
+
+    def _rebuild_layout(self) -> None:
+        if not self._entries:
+            self.setMinimumHeight(0)
+            return
+
+        available_width = max(1, self.contentsRect().width())
+        spacing = self._layout.horizontalSpacing()
+        target_column_width = self.MINIMUM_COLUMN_WIDTH + spacing
+        column_count = max(1, available_width // target_column_width)
+        if column_count == self._column_count and self._layout.count() == len(self._entries):
+            return
+
+        self._column_count = column_count
+        while self._layout.count():
+            self._layout.takeAt(0)
+
+        for column_index in range(column_count):
+            self._layout.setColumnStretch(column_index, 1)
+
+        for index, entry in enumerate(self._entries):
+            row_index = index // column_count
+            column_index = index % column_count
+            self._layout.addWidget(entry, row_index, column_index)
+
+        self.setMinimumHeight(self.sizeHint().height())
+        self.updateGeometry()
+
+
+class _LegendResizeHandle(QWidget):
+    dragged = Signal(int)
+    dragFinished = Signal()
+
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._orientation = orientation
+        self._hovered = False
+        self._pressed = False
+        self._last_global_pos: QPoint | None = None
+
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.setFixedSize(22, 22)
+        self.setCursor(
+            Qt.SizeHorCursor if orientation == Qt.Horizontal else Qt.SizeVerCursor
+        )
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        if not self._pressed:
+            self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        self._pressed = True
+        self._last_global_pos = event.globalPosition().toPoint()
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._pressed or self._last_global_pos is None:
+            super().mouseMoveEvent(event)
+            return
+
+        current_global_pos = event.globalPosition().toPoint()
+        delta = current_global_pos - self._last_global_pos
+        primary_delta = delta.x() if self._orientation == Qt.Horizontal else delta.y()
+        if primary_delta:
+            self.dragged.emit(primary_delta)
+            self._last_global_pos = current_global_pos
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton or not self._pressed:
+            super().mouseReleaseEvent(event)
+            return
+        self._pressed = False
+        self._last_global_pos = None
+        self.update()
+        self.dragFinished.emit()
+        event.accept()
+
+    def paintEvent(self, event) -> None:
+        del event
+        diameter = 14
+        if self._hovered or self._pressed:
+            diameter = 18
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        fill_color = QColor("#8FB7DA" if self._hovered or self._pressed else "#5C7892")
+        border_color = QColor("#D8DFE6" if self._pressed else "#9FB4C6")
+        painter.setPen(border_color)
+        painter.setBrush(fill_color)
+        x_pos = (self.width() - diameter) / 2
+        y_pos = (self.height() - diameter) / 2
+        painter.drawEllipse(int(x_pos), int(y_pos), diameter, diameter)
+
+
+class _FloatingLegendOverlay(QFrame):
+    stateChanged = Signal()
+
+    _DEFAULT_SIZE = (260, 180)
+    _MIN_WIDTH = 240
+    _MIN_HEIGHT = 120
+    _COLLAPSED_HEIGHT = 34
+    _EDGE_PADDING = 12
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("floatingLegendOverlay")
+        self.setMouseTracking(True)
+
+        self._drag_offset: QPoint | None = None
+        self._expanded_size = None
+        self._minimized = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._header = QWidget(self)
+        self._header.setObjectName("floatingLegendHeader")
+        header_layout = QHBoxLayout(self._header)
+        header_layout.setContentsMargins(8, 6, 6, 6)
+        header_layout.setSpacing(6)
+
+        self._title_label = QLabel("Trend legend", self._header)
+        header_layout.addWidget(self._title_label)
+        header_layout.addStretch()
+
+        self._toggle_button = QPushButton("-", self._header)
+        self._toggle_button.setObjectName("floatingLegendToggle")
+        self._toggle_button.setFixedSize(22, 20)
+        self._toggle_button.clicked.connect(self.toggle_minimized)
+        header_layout.addWidget(self._toggle_button)
+
+        layout.addWidget(self._header)
+
+        self._scroll_area = QScrollArea(self)
+        self._scroll_area.setObjectName("floatingLegendScrollArea")
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
+        layout.addWidget(self._scroll_area, stretch=1)
+
+        self._entries_container = _WrappingLegendEntries(self)
+        self._scroll_area.setWidget(self._entries_container)
+
+        self._width_handle = _LegendResizeHandle(Qt.Horizontal, self)
+        self._width_handle.dragged.connect(self._resize_width_by)
+        self._width_handle.dragFinished.connect(self.stateChanged.emit)
+
+        self._height_handle = _LegendResizeHandle(Qt.Vertical, self)
+        self._height_handle.dragged.connect(self._resize_height_by)
+        self._height_handle.dragFinished.connect(self.stateChanged.emit)
+
+        self.resize(*self._DEFAULT_SIZE)
+        self.hide()
+
+    def set_entries(self, entries: list[tuple[str, str]]) -> None:
+        self._entries_container.set_entries(entries)
+        if entries:
+            self.show()
+            self.raise_()
+            self._update_resize_handles()
+            self.clamp_to_parent()
+        else:
+            self.hide()
+
+    def legend_state(self) -> dict[str, object]:
+        expanded_size = self._expanded_size if self._expanded_size is not None else self.size()
+        return {
+            "floating_overlay_geometry": [
+                int(self.x()),
+                int(self.y()),
+                int(self.width()),
+                int(self.height()),
+            ],
+            "floating_overlay_expanded_size": [
+                int(expanded_size.width()),
+                int(expanded_size.height()),
+            ],
+            "floating_overlay_minimized": self._minimized,
+        }
+
+    def apply_state(self, state: dict[str, object]) -> None:
+        expanded_size = state.get("floating_overlay_expanded_size")
+        if (
+            isinstance(expanded_size, list)
+            and len(expanded_size) == 2
+            and all(isinstance(value, int) for value in expanded_size)
+        ):
+            self._expanded_size = self._clamp_size(expanded_size[0], expanded_size[1])
+
+        geometry = state.get("floating_overlay_geometry")
+        if (
+            isinstance(geometry, list)
+            and len(geometry) == 4
+            and all(isinstance(value, int) for value in geometry)
+        ):
+            x_pos, y_pos, width, height = geometry
+            self.setGeometry(self._clamp_geometry(QRect(x_pos, y_pos, width, height)))
+            if self._expanded_size is None:
+                self._expanded_size = self.size()
+
+        self.set_minimized(
+            bool(state.get("floating_overlay_minimized", False)),
+            preserve_expanded_size=True,
+        )
+        self.clamp_to_parent()
+
+    def set_minimized(
+        self,
+        minimized: bool,
+        *,
+        preserve_expanded_size: bool = False,
+    ) -> None:
+        if minimized == self._minimized:
+            return
+
+        self._minimized = minimized
+        if minimized:
+            if not preserve_expanded_size:
+                self._expanded_size = self._clamp_size(self.width(), self.height())
+            self._scroll_area.hide()
+            self._toggle_button.setText("+")
+            self.setMinimumHeight(self._COLLAPSED_HEIGHT)
+            self.setMaximumHeight(self._COLLAPSED_HEIGHT)
+            self.resize(max(self.width(), self._MIN_WIDTH), self._COLLAPSED_HEIGHT)
+        else:
+            expanded_size = self._expanded_size or self._clamp_size(*self._DEFAULT_SIZE)
+            self._scroll_area.show()
+            self._toggle_button.setText("-")
+            self.setMinimumSize(self._MIN_WIDTH, self._MIN_HEIGHT)
+            self.setMaximumHeight(16_777_215)
+            self.resize(expanded_size)
+
+        self._update_resize_handles()
+        self.clamp_to_parent()
+
+    def toggle_minimized(self) -> None:
+        self.set_minimized(not self._minimized)
+        self.stateChanged.emit()
+
+    def clamp_to_parent(self) -> None:
+        self.setGeometry(self._clamp_geometry(self.geometry()))
+        self._update_resize_handles()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not self._minimized:
+            self._expanded_size = self._clamp_size(self.width(), self.height())
+        self._update_resize_handles()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        if self._header.geometry().contains(event.position().toPoint()):
+            self._drag_offset = event.position().toPoint()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_offset is None:
+            super().mouseMoveEvent(event)
+            return
+
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        target_top_left = parent.mapFromGlobal(
+            event.globalPosition().toPoint() - self._drag_offset
+        )
+        self.setGeometry(self._clamp_geometry(QRect(target_top_left, self.size())))
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_offset is None or event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        self._drag_offset = None
+        self.unsetCursor()
+        self.stateChanged.emit()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._header.geometry().contains(event.position().toPoint()):
+            self.toggle_minimized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _resize_width_by(self, delta: int) -> None:
+        if self._minimized:
+            return
+        geometry = self.geometry()
+        geometry.setWidth(geometry.width() + delta)
+        self.setGeometry(self._clamp_geometry(geometry))
+
+    def _resize_height_by(self, delta: int) -> None:
+        if self._minimized:
+            return
+        geometry = self.geometry()
+        geometry.setHeight(geometry.height() + delta)
+        self.setGeometry(self._clamp_geometry(geometry))
+
+    def _update_resize_handles(self) -> None:
+        handle_visible = not self._minimized
+        self._width_handle.setVisible(handle_visible)
+        self._height_handle.setVisible(handle_visible)
+        if not handle_visible:
+            return
+
+        self._width_handle.raise_()
+        self._height_handle.raise_()
+        self._width_handle.move(
+            self.width() - self._width_handle.width() - 4,
+            max(
+                self._header.height() + 8,
+                (self.height() - self._width_handle.height()) // 2,
+            ),
+        )
+        self._height_handle.move(
+            max(8, (self.width() - self._height_handle.width()) // 2),
+            self.height() - self._height_handle.height() - 4,
+        )
+
+    def _clamp_size(self, width: int, height: int):
+        parent = self.parentWidget()
+        size_class = self.size().__class__
+        if parent is None:
+            return size_class(width, height)
+
+        available = parent.rect().adjusted(
+            self._EDGE_PADDING,
+            self._EDGE_PADDING,
+            -self._EDGE_PADDING,
+            -self._EDGE_PADDING,
+        )
+        min_height = self._COLLAPSED_HEIGHT if self._minimized else self._MIN_HEIGHT
+        width = max(self._MIN_WIDTH, min(width, available.width()))
+        height = max(min_height, min(height, available.height()))
+        return size_class(width, height)
+
+    def _clamp_geometry(self, geometry: QRect) -> QRect:
+        parent = self.parentWidget()
+        if parent is None:
+            return geometry
+
+        available = parent.rect().adjusted(
+            self._EDGE_PADDING,
+            self._EDGE_PADDING,
+            -self._EDGE_PADDING,
+            -self._EDGE_PADDING,
+        )
+        if available.width() <= 0 or available.height() <= 0:
+            return geometry
+
+        min_height = self._COLLAPSED_HEIGHT if self._minimized else self._MIN_HEIGHT
+        width = max(self._MIN_WIDTH, min(geometry.width(), available.width()))
+        height = max(min_height, min(geometry.height(), available.height()))
+
+        x_pos = min(max(geometry.x(), available.left()), available.right() - width + 1)
+        y_pos = min(max(geometry.y(), available.top()), available.bottom() - height + 1)
+        return QRect(x_pos, y_pos, width, height)
+
+
 class TrendPlotWidget(QWidget):
     """Phase-2 preview plot with visible-window slicing and downsampling."""
 
     visibleRangeChanged = Signal(float, float)
     visibleStatsChanged = Signal(object)
+    panFractionChanged = Signal(int, int)
+    legendStateChanged = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -75,18 +524,13 @@ class TrendPlotWidget(QWidget):
         self._plot_widget.hideButtons()
         self._plot_widget.setLabel("bottom", "Time")
         self._plot_widget.setLabel("left", "Value")
-        self._legend_item = self._plot_widget.addLegend(offset=(12, 12))
-        if hasattr(self._legend_item, "setBrush"):
-            self._legend_item.setBrush(pg.mkBrush("#20262D"))
-        if hasattr(self._legend_item, "setPen"):
-            self._legend_item.setPen(pg.mkPen("#37414B"))
-        if hasattr(self._legend_item, "setLabelTextColor"):
-            self._legend_item.setLabelTextColor("#D8DFE6")
         layout.addWidget(self._plot_widget, stretch=1)
+        layout.addWidget(self._build_navigation_row())
 
         self._current_workbook_name = ""
         self._current_plotted_series: list[TrendPlotSeries] = []
         self._prepared_series: list[_PreparedTrendPlotSeries] = []
+        self._data_x_range: tuple[float, float] | None = None
         self._pending_x_range: tuple[float, float] | None = None
         self._suspend_range_updates = False
 
@@ -95,16 +539,83 @@ class TrendPlotWidget(QWidget):
         self._range_update_timer.setInterval(24)
         self._range_update_timer.timeout.connect(self._apply_pending_range_update)
 
+        self._floating_legend_overlay = _FloatingLegendOverlay(self._plot_widget)
+        self._floating_legend_overlay.move(16, 16)
+        self._floating_legend_overlay.stateChanged.connect(self.legendStateChanged.emit)
+
+        self._plot_widget.installEventFilter(self)
         self._plot_widget.sigXRangeChanged.connect(self._handle_x_range_changed)
 
         self.show_empty(
             "No live trend data loaded.\nOpen a workbook to prepare sheets and tags for plotting."
         )
 
+    def _build_navigation_row(self) -> QWidget:
+        container = QWidget(self)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addStretch()
+
+        self._pan_numerator_spin = QSpinBox(container)
+        self._pan_numerator_spin.setRange(1, 100)
+        self._pan_numerator_spin.setValue(1)
+        self._pan_numerator_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._pan_numerator_spin.setAlignment(Qt.AlignCenter)
+        self._pan_numerator_spin.setFixedWidth(52)
+        self._pan_numerator_spin.valueChanged.connect(self._handle_pan_fraction_changed)
+        layout.addWidget(self._pan_numerator_spin)
+
+        slash_label = QLabel("/", container)
+        slash_label.setAlignment(Qt.AlignCenter)
+        slash_label.setFixedWidth(10)
+        layout.addWidget(slash_label)
+
+        self._pan_denominator_spin = QSpinBox(container)
+        self._pan_denominator_spin.setRange(1, 100)
+        self._pan_denominator_spin.setValue(4)
+        self._pan_denominator_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._pan_denominator_spin.setAlignment(Qt.AlignCenter)
+        self._pan_denominator_spin.setFixedWidth(52)
+        self._pan_denominator_spin.valueChanged.connect(self._handle_pan_fraction_changed)
+        layout.addWidget(self._pan_denominator_spin)
+
+        self._pan_left_button = QPushButton("<", container)
+        self._pan_left_button.setFixedWidth(40)
+        self._pan_left_button.clicked.connect(self._pan_left_by_fraction)
+        layout.addWidget(self._pan_left_button)
+
+        self._pan_right_button = QPushButton(">", container)
+        self._pan_right_button.setFixedWidth(40)
+        self._pan_right_button.clicked.connect(self._pan_right_by_fraction)
+        layout.addWidget(self._pan_right_button)
+
+        return container
+
+    def pan_fraction(self) -> tuple[int, int]:
+        return self._pan_numerator_spin.value(), self._pan_denominator_spin.value()
+
+    def set_pan_fraction(self, numerator: int, denominator: int) -> None:
+        safe_numerator = max(1, min(100, int(numerator)))
+        safe_denominator = max(1, min(100, int(denominator)))
+        with (
+            QSignalBlocker(self._pan_numerator_spin),
+            QSignalBlocker(self._pan_denominator_spin),
+        ):
+            self._pan_numerator_spin.setValue(safe_numerator)
+            self._pan_denominator_spin.setValue(safe_denominator)
+
+    def legend_state(self) -> dict[str, object]:
+        return self._floating_legend_overlay.legend_state()
+
+    def apply_legend_state(self, state: dict[str, object]) -> None:
+        self._floating_legend_overlay.apply_state(state)
+
     def show_empty(self, message: str) -> None:
         self._current_workbook_name = ""
         self._current_plotted_series = []
         self._prepared_series = []
+        self._data_x_range = None
         self._pending_x_range = None
         self._summary_label.setText(message)
 
@@ -113,9 +624,9 @@ class TrendPlotWidget(QWidget):
         plot_item.setTitle("")
         plot_item.setLabel("left", "Value")
         plot_item.setLabel("bottom", "Time")
-        if self._legend_item is not None:
-            self._legend_item.clear()
+        self._floating_legend_overlay.set_entries([])
 
+        self._set_navigation_enabled(False)
         self.visibleStatsChanged.emit([])
 
     def plot_series_group(
@@ -126,8 +637,6 @@ class TrendPlotWidget(QWidget):
     ) -> None:
         plot_item = self._plot_widget.getPlotItem()
         plot_item.clear()
-        if self._legend_item is not None:
-            self._legend_item.clear()
 
         prepared_series: list[_PreparedTrendPlotSeries] = []
         x_min_values: list[float] = []
@@ -146,7 +655,6 @@ class TrendPlotWidget(QWidget):
                 [],
                 pen=pg.mkPen(color, width=2),
                 connect="finite",
-                name=plotted.series.tag_name,
             )
             curve.setSkipFiniteCheck(True)
 
@@ -182,17 +690,26 @@ class TrendPlotWidget(QWidget):
         self._current_workbook_name = workbook_name
         self._current_plotted_series = [prepared.plotted for prepared in prepared_series]
         self._prepared_series = prepared_series
-
         x_min = min(x_min_values)
         x_max = max(x_max_values)
-        self._suspend_range_updates = True
-        plot_item.setXRange(x_min, x_max, padding=0.02)
-        self._suspend_range_updates = False
-        self._update_visible_window(x_min, x_max)
+        self._data_x_range = (x_min, x_max)
+        self._floating_legend_overlay.set_entries(
+            [
+                (prepared.color, prepared.plotted.series.tag_name)
+                for prepared in prepared_series
+            ]
+        )
+        self._set_navigation_enabled(True)
+
+        self._set_visible_range(x_min, x_max)
 
     def current_x_range(self) -> tuple[float, float]:
         x_range = self._plot_widget.getPlotItem().viewRange()[0]
         return float(x_range[0]), float(x_range[1])
+
+    def current_y_range(self) -> tuple[float, float]:
+        y_range = self._plot_widget.getPlotItem().viewRange()[1]
+        return float(y_range[0]), float(y_range[1])
 
     def _handle_x_range_changed(self, _plot_widget, x_range) -> None:
         if self._suspend_range_updates:
@@ -216,7 +733,13 @@ class TrendPlotWidget(QWidget):
         self._pending_x_range = None
         self._update_visible_window(x_min, x_max)
 
-    def _update_visible_window(self, x_min: float, x_max: float) -> None:
+    def _update_visible_window(
+        self,
+        x_min: float,
+        x_max: float,
+        *,
+        preserved_y_range: tuple[float, float] | None = None,
+    ) -> None:
         if not self._prepared_series:
             return
 
@@ -268,7 +791,11 @@ class TrendPlotWidget(QWidget):
                 )
             )
 
-        self._apply_visible_y_range(y_min_values, y_max_values)
+        if preserved_y_range is None:
+            self._apply_visible_y_range(y_min_values, y_max_values)
+        else:
+            self._set_y_range(*preserved_y_range)
+
         self._summary_label.setText(
             _build_summary_text(
                 workbook_name=self._current_workbook_name,
@@ -295,13 +822,86 @@ class TrendPlotWidget(QWidget):
         else:
             padding = (y_max - y_min) * 0.08
 
+        self._set_y_range(y_min - padding, y_max + padding)
+
+    def _set_visible_range(
+        self,
+        x_min: float,
+        x_max: float,
+        *,
+        preserved_y_range: tuple[float, float] | None = None,
+    ) -> None:
+        plot_item = self._plot_widget.getPlotItem()
+        self._pending_x_range = None
+        self._range_update_timer.stop()
         self._suspend_range_updates = True
-        self._plot_widget.getPlotItem().setYRange(
-            y_min - padding,
-            y_max + padding,
-            padding=0,
-        )
+        plot_item.setXRange(x_min, x_max, padding=0)
         self._suspend_range_updates = False
+        self._update_visible_window(x_min, x_max, preserved_y_range=preserved_y_range)
+
+    def _set_y_range(self, y_min: float, y_max: float) -> None:
+        if not np.isfinite(y_min) or not np.isfinite(y_max):
+            return
+        if y_min >= y_max:
+            padding = abs(y_min) * 0.05 or 1.0
+            y_min -= padding
+            y_max += padding
+
+        self._suspend_range_updates = True
+        self._plot_widget.getPlotItem().setYRange(y_min, y_max, padding=0)
+        self._suspend_range_updates = False
+
+    def _set_navigation_enabled(self, enabled: bool) -> None:
+        self._pan_numerator_spin.setEnabled(enabled)
+        self._pan_denominator_spin.setEnabled(enabled)
+        self._pan_left_button.setEnabled(enabled)
+        self._pan_right_button.setEnabled(enabled)
+
+    def _handle_pan_fraction_changed(self, _value: int) -> None:
+        numerator, denominator = self.pan_fraction()
+        self.panFractionChanged.emit(numerator, denominator)
+
+    def _pan_left_by_fraction(self) -> None:
+        self._pan_by_fraction(-1.0)
+
+    def _pan_right_by_fraction(self) -> None:
+        self._pan_by_fraction(1.0)
+
+    def _pan_by_fraction(self, direction: float) -> None:
+        if not self._prepared_series:
+            return
+
+        x_min, x_max = self.current_x_range()
+        window_width = x_max - x_min
+        if window_width <= 0:
+            return
+
+        numerator, denominator = self.pan_fraction()
+        step = window_width * (numerator / denominator)
+        if step <= 0:
+            return
+
+        target_x_min = x_min + (step * direction)
+        target_x_max = x_max + (step * direction)
+        if self._data_x_range is not None:
+            target_x_min, target_x_max = _clamp_x_range(
+                target_x_min,
+                target_x_max,
+                self._data_x_range[0],
+                self._data_x_range[1],
+            )
+
+        current_y_range = self.current_y_range()
+        self._set_visible_range(
+            target_x_min,
+            target_x_max,
+            preserved_y_range=current_y_range,
+        )
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if watched is self._plot_widget and event.type() == QEvent.Resize:
+            self._floating_legend_overlay.clamp_to_parent()
+        return super().eventFilter(watched, event)
 
 
 def _build_summary_text(
@@ -393,3 +993,29 @@ def _downsample_visible_slice(
     sampled_indices.append(x_values.size - 1)
     unique_indices = np.unique(np.asarray(sampled_indices, dtype=np.int64))
     return x_values[unique_indices], y_values[unique_indices]
+
+
+def _clamp_x_range(
+    x_min: float,
+    x_max: float,
+    data_min: float,
+    data_max: float,
+) -> tuple[float, float]:
+    if data_min >= data_max:
+        return data_min, data_max
+
+    window_width = x_max - x_min
+    data_width = data_max - data_min
+    if window_width >= data_width:
+        return data_min, data_max
+
+    if x_min < data_min:
+        shift = data_min - x_min
+        x_min += shift
+        x_max += shift
+    if x_max > data_max:
+        shift = x_max - data_max
+        x_min -= shift
+        x_max -= shift
+
+    return x_min, x_max
