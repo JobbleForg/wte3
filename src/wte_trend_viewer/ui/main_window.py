@@ -41,12 +41,15 @@ from .widgets.hierarchy_tree import (
 )
 from .widgets.imported_tag_list import SearchableImportedTagList
 from .widgets.trend_plot_widget import (
+    DEFAULT_DURATION_PRESETS,
     PLOT_COLORS,
     TrendCursorSeriesStats,
     TrendCursorStats,
     TrendPlotSeries,
     TrendPlotWidget,
     TrendVisibleSeriesStats,
+    normalize_duration_presets,
+    parse_duration_text,
 )
 
 
@@ -94,7 +97,9 @@ class TrendViewerMainWindow(QMainWindow):
         self._main_workspace_splitter: QSplitter | None = None
         self._bottom_tabs: QTabWidget | None = None
         self._trend_plot_widget: TrendPlotWidget | None = None
-        self._legend_list: QListWidget | None = None
+        self._legend_table: QTableWidget | None = None
+        self._suspend_legend_table_updates = False
+        self._time_preset_list: QListWidget | None = None
         self._analytics_table: QTableWidget | None = None
         self._current_plotted_series: list[TrendPlotSeries] = []
         self._current_visible_stats: list[TrendVisibleSeriesStats] = []
@@ -266,7 +271,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._trend_plot_widget.visibleStatsChanged.connect(self._handle_plot_visible_stats_changed)
         self._trend_plot_widget.cursorStatsChanged.connect(self._handle_plot_cursor_stats_changed)
         self._trend_plot_widget.panFractionChanged.connect(self._handle_workspace_changed)
-        self._trend_plot_widget.legendStateChanged.connect(self._handle_workspace_changed)
+        self._trend_plot_widget.timeSelectionStateChanged.connect(self._handle_workspace_changed)
 
         layout.addWidget(title)
         layout.addWidget(self._trend_plot_widget, stretch=1)
@@ -285,19 +290,147 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._legend_list = QListWidget(container)
-        self._legend_list.setAlternatingRowColors(True)
-        self._legend_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._legend_table = QTableWidget(0, 4, container)
+        self._legend_table.setHorizontalHeaderLabels(
+            ["Tag", "Sheet", "Low Range", "High Range"]
+        )
+        self._legend_table.verticalHeader().setVisible(False)
+        self._legend_table.setAlternatingRowColors(True)
+        self._legend_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._legend_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._legend_table.itemChanged.connect(self._handle_legend_table_item_changed)
 
-        layout.addWidget(self._legend_list)
+        layout.addWidget(self._legend_table)
         return container
 
     def _build_settings_tab(self) -> QWidget:
         container = QWidget(self)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.addStretch()
+
+        title = QLabel("Time Duration Presets", container)
+        layout.addWidget(title)
+
+        helper = QLabel(
+            "These presets feed the trend time-selection dropdown. Enter values like 15m, 1h, 2d, or 01:30:00.",
+            container,
+        )
+        helper.setWordWrap(True)
+        layout.addWidget(helper)
+
+        self._time_preset_list = QListWidget(container)
+        self._time_preset_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self._time_preset_list, stretch=1)
+
+        button_row = QHBoxLayout()
+        add_button = QPushButton("Add", container)
+        add_button.clicked.connect(self._add_time_preset)
+        button_row.addWidget(add_button)
+
+        edit_button = QPushButton("Edit", container)
+        edit_button.clicked.connect(self._edit_selected_time_preset)
+        button_row.addWidget(edit_button)
+
+        remove_button = QPushButton("Remove", container)
+        remove_button.clicked.connect(self._remove_selected_time_preset)
+        button_row.addWidget(remove_button)
+
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
         return container
+
+    def _stored_time_presets(self) -> list[str]:
+        raw_presets = self._session.settings_state.get("time_duration_presets")
+        if isinstance(raw_presets, list):
+            return normalize_duration_presets([str(value) for value in raw_presets])
+        return list(DEFAULT_DURATION_PRESETS)
+
+    def _apply_time_presets(self, presets: list[str]) -> None:
+        normalized_presets = normalize_duration_presets(presets)
+        if self._time_preset_list is not None:
+            selected_text = ""
+            current_item = self._time_preset_list.currentItem()
+            if current_item is not None:
+                selected_text = current_item.text().strip()
+            self._time_preset_list.clear()
+            for preset in normalized_presets:
+                self._time_preset_list.addItem(QListWidgetItem(preset))
+            if selected_text:
+                matching_items = self._time_preset_list.findItems(selected_text, Qt.MatchExactly)
+                if matching_items:
+                    self._time_preset_list.setCurrentItem(matching_items[0])
+
+        if self._trend_plot_widget is not None:
+            self._trend_plot_widget.set_time_presets(normalized_presets)
+
+    def _set_time_presets(self, presets: list[str], *, persist: bool) -> None:
+        normalized_presets = normalize_duration_presets(presets)
+        self._session.settings_state["time_duration_presets"] = list(normalized_presets)
+        self._apply_time_presets(normalized_presets)
+        if persist:
+            self._handle_workspace_changed()
+
+    def _add_time_preset(self) -> None:
+        value, accepted = QInputDialog.getText(
+            self,
+            "Add Time Preset",
+            "Duration preset (for example 15m, 1h, 2d, or 01:30:00):",
+        )
+        if not accepted:
+            return
+
+        normalized = _normalize_time_preset_input(value)
+        if normalized is None:
+            self.statusBar().showMessage("Enter a valid duration preset.", 4000)
+            return
+
+        presets = self._stored_time_presets()
+        presets.append(normalized)
+        self._set_time_presets(presets, persist=True)
+        self.statusBar().showMessage(f"Added time preset: {normalized}", 3000)
+
+    def _edit_selected_time_preset(self) -> None:
+        if self._time_preset_list is None or self._time_preset_list.currentItem() is None:
+            self.statusBar().showMessage("Select a time preset to edit.", 3000)
+            return
+
+        current_item = self._time_preset_list.currentItem()
+        current_text = current_item.text().strip()
+        value, accepted = QInputDialog.getText(
+            self,
+            "Edit Time Preset",
+            "Duration preset:",
+            text=current_text,
+        )
+        if not accepted:
+            return
+
+        normalized = _normalize_time_preset_input(value)
+        if normalized is None:
+            self.statusBar().showMessage("Enter a valid duration preset.", 4000)
+            return
+
+        presets = self._stored_time_presets()
+        try:
+            item_index = presets.index(current_text)
+        except ValueError:
+            item_index = -1
+        if item_index >= 0:
+            presets[item_index] = normalized
+        else:
+            presets.append(normalized)
+        self._set_time_presets(presets, persist=True)
+        self.statusBar().showMessage(f"Updated time preset: {normalized}", 3000)
+
+    def _remove_selected_time_preset(self) -> None:
+        if self._time_preset_list is None or self._time_preset_list.currentItem() is None:
+            self.statusBar().showMessage("Select a time preset to remove.", 3000)
+            return
+
+        selected_text = self._time_preset_list.currentItem().text().strip()
+        presets = [preset for preset in self._stored_time_presets() if preset != selected_text]
+        self._set_time_presets(presets, persist=True)
+        self.statusBar().showMessage(f"Removed time preset: {selected_text}", 3000)
 
     def _build_analytics_tab(self) -> QWidget:
         container = QWidget(self)
@@ -543,6 +676,7 @@ class TrendViewerMainWindow(QMainWindow):
                 self._populate_tree_from_node(node)
 
             self.set_imported_tags(session.imported_tags, persist=False)
+            self._apply_time_presets(self._stored_time_presets())
 
             if self._trend_plot_widget is not None:
                 self._trend_plot_widget.set_pan_fraction(
@@ -555,7 +689,7 @@ class TrendViewerMainWindow(QMainWindow):
                         default=4,
                     ),
                 )
-                self._trend_plot_widget.apply_legend_state(session.legend_state)
+                self._trend_plot_widget.set_time_selection_state(session.trend_state)
 
             ui_state = session.ui_state
             if self._left_workspace_splitter is not None:
@@ -658,18 +792,18 @@ class TrendViewerMainWindow(QMainWindow):
             pan_numerator, pan_denominator = self._trend_plot_widget.pan_fraction()
             trend_state["pan_step_numerator"] = pan_numerator
             trend_state["pan_step_denominator"] = pan_denominator
-            legend_state = self._trend_plot_widget.legend_state()
-        else:
-            legend_state = dict(self._session.legend_state)
+            trend_state.update(self._trend_plot_widget.time_selection_state())
 
+        settings_state = dict(self._session.settings_state)
+        settings_state["time_duration_presets"] = self._stored_time_presets()
         return WorkspaceSession(
             version=self._session.version,
             hierarchy=self._snapshot_hierarchy(),
             imported_tags=self._imported_tags_list.tags(),
             trend_state=trend_state,
-            legend_state=legend_state,
+            legend_state={},
             analytics_state=dict(self._session.analytics_state),
-            settings_state=dict(self._session.settings_state),
+            settings_state=settings_state,
             ui_state=ui_state,
         )
 
@@ -718,12 +852,7 @@ class TrendViewerMainWindow(QMainWindow):
             self._update_plot_support_panels([])
             return
 
-        sheet_names = ", ".join(self._loaded_workbook.selected_sheet_names)
         self._trend_plot_widget.show_empty(
-            f"{self._loaded_workbook.source_path.name}\n"
-            f"Sheets: {sheet_names}\n"
-            f"Rows: {self._loaded_workbook.total_row_count:,} | "
-            f"Tags: {self._loaded_workbook.tag_count:,}\n"
             "Select one or more imported tags to preview the loaded trends."
         )
         self._update_plot_support_panels([])
@@ -786,9 +915,14 @@ class TrendViewerMainWindow(QMainWindow):
             plotted.series.tag_name for plotted in plotted_series
         ]
         self._current_plotted_series = list(plotted_series)
+        display_ranges_by_tag = {
+            plotted.series.tag_name: self._resolved_display_range(plotted)
+            for plotted in plotted_series
+        }
         self._trend_plot_widget.plot_series_group(
             workbook_name=self._loaded_workbook.source_path.name,
             plotted_series=plotted_series,
+            display_ranges_by_tag=display_ranges_by_tag,
         )
         self._update_plot_support_panels(plotted_series)
         if persist_selection:
@@ -843,6 +977,46 @@ class TrendViewerMainWindow(QMainWindow):
             return [legacy_value.strip()]
         return []
 
+    def _display_ranges_state(self) -> dict[str, object]:
+        ranges = self._session.trend_state.get("display_ranges")
+        if isinstance(ranges, dict):
+            return ranges
+        ranges = {}
+        self._session.trend_state["display_ranges"] = ranges
+        return ranges
+
+    def _resolved_display_range(self, plotted: TrendPlotSeries) -> tuple[float, float]:
+        stored = self._stored_display_range(plotted.series.tag_name)
+        if stored is not None:
+            return stored
+
+        minimum_value = plotted.series.minimum_value()
+        maximum_value = plotted.series.maximum_value()
+        return _normalize_display_range(minimum_value, maximum_value)
+
+    def _resolved_display_range_for_tag_name(self, tag_name: str) -> tuple[float, float]:
+        for plotted in self._current_plotted_series:
+            if plotted.series.tag_name == tag_name:
+                return self._resolved_display_range(plotted)
+        return 0.0, 1.0
+
+    def _stored_display_range(self, tag_name: str) -> tuple[float, float] | None:
+        entry = self._display_ranges_state().get(tag_name)
+        if not isinstance(entry, dict):
+            return None
+
+        low_range = _coerce_float(entry.get("low"))
+        high_range = _coerce_float(entry.get("high"))
+        if low_range is None or high_range is None or low_range >= high_range:
+            return None
+        return low_range, high_range
+
+    def _set_display_range(self, tag_name: str, low_range: float, high_range: float) -> None:
+        self._display_ranges_state()[tag_name] = {
+            "low": float(low_range),
+            "high": float(high_range),
+        }
+
     def _selected_imported_tag_names(self) -> list[str]:
         selected: list[str] = []
         for index in range(self._imported_tags_list.count()):
@@ -852,7 +1026,7 @@ class TrendViewerMainWindow(QMainWindow):
         return selected
 
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
-        self._update_legend_list(plotted_series)
+        self._update_legend_table(plotted_series)
         self._update_analytics_table()
 
     def _handle_plot_visible_stats_changed(self, visible_stats: object) -> None:
@@ -871,24 +1045,114 @@ class TrendViewerMainWindow(QMainWindow):
             self._current_cursor_stats = None
         self._update_analytics_table()
 
-    def _update_legend_list(self, plotted_series: list[TrendPlotSeries]) -> None:
-        if self._legend_list is None:
+    def _update_legend_table(self, plotted_series: list[TrendPlotSeries]) -> None:
+        if self._legend_table is None:
             return
 
-        self._legend_list.clear()
-        if not plotted_series:
-            placeholder = QListWidgetItem("No plotted tags.")
-            placeholder.setFlags(Qt.NoItemFlags)
-            self._legend_list.addItem(placeholder)
+        self._suspend_legend_table_updates = True
+        try:
+            self._legend_table.setRowCount(0)
+            if not plotted_series:
+                self._legend_table.setRowCount(1)
+                placeholder = QTableWidgetItem("No plotted tags.")
+                placeholder.setFlags(Qt.NoItemFlags)
+                self._legend_table.setItem(0, 0, placeholder)
+                return
+
+            for row_index, plotted in enumerate(plotted_series):
+                color = QColor(PLOT_COLORS[row_index % len(PLOT_COLORS)])
+                low_range, high_range = self._resolved_display_range(plotted)
+
+                tag_item = QTableWidgetItem(plotted.series.tag_name)
+                tag_item.setData(Qt.UserRole, plotted.series.tag_name)
+                tag_item.setForeground(color)
+                tag_item.setFlags(tag_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.insertRow(row_index)
+                self._legend_table.setItem(row_index, 0, tag_item)
+
+                sheet_item = QTableWidgetItem(plotted.sheet.name)
+                sheet_item.setForeground(color)
+                sheet_item.setFlags(sheet_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 1, sheet_item)
+
+                low_item = QTableWidgetItem(_format_range_value(low_range))
+                low_item.setForeground(color)
+                low_item.setData(Qt.UserRole, plotted.series.tag_name)
+                self._legend_table.setItem(row_index, 2, low_item)
+
+                high_item = QTableWidgetItem(_format_range_value(high_range))
+                high_item.setForeground(color)
+                high_item.setData(Qt.UserRole, plotted.series.tag_name)
+                self._legend_table.setItem(row_index, 3, high_item)
+        finally:
+            self._suspend_legend_table_updates = False
+
+        self._legend_table.resizeColumnsToContents()
+
+    def _handle_legend_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._suspend_legend_table_updates or item.column() not in {2, 3}:
+            return
+        if self._legend_table is None:
             return
 
-        for index, plotted in enumerate(plotted_series):
-            item = QListWidgetItem(
-                f"{plotted.series.tag_name}  |  Sheet: {plotted.sheet.name}"
+        tag_item = self._legend_table.item(item.row(), 0)
+        low_item = self._legend_table.item(item.row(), 2)
+        high_item = self._legend_table.item(item.row(), 3)
+        if tag_item is None or low_item is None or high_item is None:
+            return
+
+        tag_name = str(tag_item.data(Qt.UserRole) or tag_item.text()).strip()
+        fallback_low, fallback_high = self._resolved_display_range_for_tag_name(tag_name)
+
+        low_range = _coerce_float(low_item.text())
+        high_range = _coerce_float(high_item.text())
+        if low_range is None or high_range is None or low_range >= high_range:
+            self._restore_legend_range_row(
+                row_index=item.row(),
+                low_range=fallback_low,
+                high_range=fallback_high,
             )
-            item.setForeground(QColor(PLOT_COLORS[index % len(PLOT_COLORS)]))
-            item.setData(Qt.UserRole, plotted.series.tag_name)
-            self._legend_list.addItem(item)
+            self.statusBar().showMessage(
+                f"Display range for {tag_name} must be numeric with Low < High.",
+                5000,
+            )
+            return
+
+        self._set_display_range(tag_name, low_range, high_range)
+        self._restore_legend_range_row(
+            row_index=item.row(),
+            low_range=low_range,
+            high_range=high_range,
+        )
+        self._refresh_current_plot_ranges()
+        self._handle_workspace_changed()
+
+    def _restore_legend_range_row(
+        self,
+        *,
+        row_index: int,
+        low_range: float,
+        high_range: float,
+    ) -> None:
+        if self._legend_table is None:
+            return
+
+        low_item = self._legend_table.item(row_index, 2)
+        high_item = self._legend_table.item(row_index, 3)
+        if low_item is None or high_item is None:
+            return
+
+        self._suspend_legend_table_updates = True
+        try:
+            low_item.setText(_format_range_value(low_range))
+            high_item.setText(_format_range_value(high_range))
+        finally:
+            self._suspend_legend_table_updates = False
+
+    def _refresh_current_plot_ranges(self) -> None:
+        if not self._current_preview_tag_names:
+            return
+        self._preview_tags(self._current_preview_tag_names, persist_selection=False)
 
     def _update_analytics_table(self) -> None:
         if self._analytics_table is None:
@@ -992,6 +1256,41 @@ def _coerce_positive_int(value: object, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return coerced if coerced > 0 else default
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_display_range(
+    minimum_value: float | None,
+    maximum_value: float | None,
+) -> tuple[float, float]:
+    if minimum_value is None or maximum_value is None:
+        return 0.0, 1.0
+    if minimum_value == maximum_value:
+        padding = abs(minimum_value) * 0.05 or 1.0
+        return minimum_value - padding, maximum_value + padding
+    return float(minimum_value), float(maximum_value)
+
+
+def _normalize_time_preset_input(value: str) -> str | None:
+    duration_seconds = parse_duration_text(value)
+    if duration_seconds is None:
+        return None
+    normalized_values = normalize_duration_presets([value])
+    return normalized_values[0] if normalized_values else None
+
+
+def _format_range_value(value: float) -> str:
+    if abs(value) >= 100:
+        return f"{value:,.2f}"
+    if abs(value) >= 1:
+        return f"{value:,.3f}"
+    return f"{value:,.4f}"
 
 
 def _build_numeric_item(

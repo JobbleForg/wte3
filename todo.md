@@ -15,9 +15,13 @@ Implemented and working on `main`:
 - cursor inspection in the plot
 - analytics table with `Prev Value`, `Cursor Value`, `Interp Value`, and `Next Value`
 - bottom tab area holding plot metadata and analytics
-
-Implemented but now explicitly unwanted:
-- floating in-plot trend legend overlay
+- bottom legend tab converted to an editable table with per-tag `Low Range` / `High Range`
+- edited display ranges persist in session state under `trend_state.display_ranges`
+- floating in-plot trend legend removed from the UI and session wiring
+- plotted series now render on a shared normalized Y display using the saved per-tag ranges
+- plot Y range is fixed to `0..100` as a shared display scale
+- plot mouse interaction is constrained to X movement only
+- a first-pass left-side shared-scale label panel now shows colored high / midpoint / low values for plotted tags
 
 Reference artifacts already saved in the repo:
 - `artifacts/app-running-main.png`
@@ -41,6 +45,9 @@ Ignore the unrelated workstation UI details from the reference image.
 
 ### Phase 1: remove stale legend direction and establish the new source of truth
 
+Status:
+- completed on `main`
+
 Goal:
 - the bottom tabs become the only plot metadata surface
 
@@ -61,6 +68,9 @@ Verification:
 - session restore still works for normal trend state
 
 ### Phase 2: add per-tag display ranges
+
+Status:
+- completed on `main`
 
 Goal:
 - every plotted tag has an editable display `Low range` and `High range`
@@ -87,6 +97,9 @@ Verification:
 
 ### Phase 3: convert plotting to a shared normalized Y display
 
+Status:
+- completed for first pass on `main`
+
 Goal:
 - all plotted tags share one visual Y space while still representing their own configured engineering ranges
 
@@ -108,6 +121,11 @@ Verification:
 - no regressions in zoom-to-window and data reload
 
 ### Phase 4: replace the Y axis presentation
+
+Status:
+- partially completed on `main`
+- first-pass left-side grouped labels are implemented
+- remaining work is layout polish and making the presentation closer to the reference screen
 
 Goal:
 - match the work-style left-side labeling model instead of separate per-series axes
@@ -134,6 +152,11 @@ Verification:
 - label layout remains readable with several plotted tags
 
 ### Phase 5: constrain plot interaction to X only
+
+Status:
+- partially completed on `main`
+- view-box mouse movement is now X-only
+- remaining work is final interaction verification and any wheel/zoom polish needed after manual testing
 
 Goal:
 - mouse drag only pans in time
@@ -186,4 +209,4 @@ Start in:
 - `src/wte_trend_viewer/ui/main_window.py`
 
 First coding target:
-- remove the floating legend overlay and make the bottom tab area the sole metadata surface before adding per-tag range editing
+- polish the left shared-scale label presentation and verify the remaining X-only interaction behavior manually

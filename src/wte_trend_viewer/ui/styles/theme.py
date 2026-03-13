@@ -47,7 +47,6 @@ QSplitter::handle {
 
 QFrame#panelCard,
 QFrame#trendViewport,
-QFrame#floatingLegendOverlay,
 QListWidget,
 QTreeWidget,
 QTableWidget,
@@ -114,32 +113,5 @@ QStatusBar {
 
 QLabel {
     color: #D8DFE6;
-}
-
-QFrame#floatingLegendOverlay {
-    background-color: rgba(23, 29, 35, 236);
-    border: 1px solid #4A5662;
-    border-radius: 6px;
-}
-
-QWidget#floatingLegendHeader {
-    background-color: rgba(32, 38, 45, 245);
-    border-bottom: 1px solid #37414B;
-}
-
-QFrame#floatingLegendEntry {
-    background-color: rgba(42, 49, 57, 190);
-    border: 1px solid rgba(74, 86, 98, 180);
-    border-radius: 4px;
-}
-
-QPushButton#floatingLegendToggle {
-    padding: 0;
-    min-width: 0;
-}
-
-QScrollArea#floatingLegendScrollArea {
-    background-color: transparent;
-    border: none;
 }
 """
