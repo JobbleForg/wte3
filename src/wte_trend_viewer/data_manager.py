@@ -307,22 +307,22 @@ def _coerce_timestamp_to_epoch(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.timestamp()
+        return _datetime_to_epoch(value)
     if isinstance(value, date):
-        return datetime.combine(value, time.min).timestamp()
+        return _datetime_to_epoch(datetime.combine(value, time.min))
     if isinstance(value, str):
         text = value.strip()
         if not text:
             return None
         try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            return _datetime_to_epoch(datetime.fromisoformat(text.replace("Z", "+00:00")))
         except ValueError:
             return None
     if isinstance(value, (int, float)):
         if value > 10_000:
             return float(value)
         excel_epoch = datetime(1899, 12, 30)
-        return (excel_epoch + timedelta(days=float(value))).timestamp()
+        return _datetime_to_epoch(excel_epoch + timedelta(days=float(value)))
     return None
 
 
@@ -340,3 +340,15 @@ def _coerce_numeric_value(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _datetime_to_epoch(value: datetime) -> float:
+    if value.tzinfo is not None:
+        return value.timestamp()
+    try:
+        return value.timestamp()
+    except OSError:
+        local_timezone = datetime.now().astimezone().tzinfo
+        if local_timezone is None:
+            raise
+        return value.replace(tzinfo=local_timezone).timestamp()
