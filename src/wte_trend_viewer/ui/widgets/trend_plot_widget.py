@@ -102,6 +102,7 @@ class TrendCursorStats:
 @dataclass
 class _PreparedTrendPlotSeries:
     plotted: TrendPlotSeries
+    display_label: str
     color: str
     display_low_range: float
     display_high_range: float
@@ -491,6 +492,7 @@ class TrendPlotWidget(QWidget):
         workbook_name: str,
         plotted_series: list[TrendPlotSeries],
         display_ranges_by_tag: dict[str, tuple[float, float]] | None = None,
+        display_labels_by_tag: dict[str, str] | None = None,
     ) -> None:
         plot_item = self._plot_widget.getPlotItem()
         self._reset_plot_item()
@@ -523,6 +525,10 @@ class TrendPlotWidget(QWidget):
             prepared_series.append(
                 _PreparedTrendPlotSeries(
                     plotted=plotted,
+                    display_label=_display_label_for_tag(
+                        plotted.series.tag_name,
+                        display_labels_by_tag,
+                    ),
                     color=color,
                     display_low_range=low_range,
                     display_high_range=high_range,
@@ -535,7 +541,13 @@ class TrendPlotWidget(QWidget):
             x_max_values.append(float(x_array[-1]))
 
         if not prepared_series:
-            tag_names = ", ".join(plotted.series.tag_name for plotted in plotted_series)
+            tag_names = ", ".join(
+                _display_label_for_tag(
+                    plotted.series.tag_name,
+                    display_labels_by_tag,
+                )
+                for plotted in plotted_series
+            )
             self.show_empty(
                 f"{workbook_name}\n{tag_names or 'Selected tags'}\n"
                 "No plottable numeric values were found."
@@ -543,7 +555,7 @@ class TrendPlotWidget(QWidget):
             return
 
         title = (
-            prepared_series[0].plotted.series.tag_name
+            prepared_series[0].display_label
             if len(prepared_series) == 1
             else f"{len(prepared_series)} selected tags"
         )
@@ -900,7 +912,7 @@ class TrendPlotWidget(QWidget):
                 self._build_scale_label(
                     value=prepared.display_high_range,
                     color=prepared.color,
-                    tooltip=f"{prepared.plotted.series.tag_name} high range",
+                    tooltip=f"{prepared.display_label} high range",
                 ),
                 row_index,
                 column_index,
@@ -909,7 +921,7 @@ class TrendPlotWidget(QWidget):
                 self._build_scale_label(
                     value=midpoint,
                     color=prepared.color,
-                    tooltip=f"{prepared.plotted.series.tag_name} midpoint",
+                    tooltip=f"{prepared.display_label} midpoint",
                 ),
                 row_index,
                 column_index,
@@ -918,7 +930,7 @@ class TrendPlotWidget(QWidget):
                 self._build_scale_label(
                     value=prepared.display_low_range,
                     color=prepared.color,
-                    tooltip=f"{prepared.plotted.series.tag_name} low range",
+                    tooltip=f"{prepared.display_label} low range",
                 ),
                 row_index,
                 column_index,
@@ -1059,6 +1071,7 @@ def _build_summary_text(
     visible_stats: list[TrendVisibleSeriesStats],
     x_min: float,
     x_max: float,
+    display_labels_by_tag: dict[str, str] | None = None,
 ) -> str:
     if not visible_stats:
         return (
@@ -1073,13 +1086,17 @@ def _build_summary_text(
         stats = visible_stats[0]
         return (
             f"{workbook_name}\n"
-            f"Sheet: {stats.sheet_name} | Tag: {stats.tag_name}\n"
+            "Sheet: "
+            f"{stats.sheet_name} | Tag: {_display_label_for_tag(stats.tag_name, display_labels_by_tag)}\n"
             f"Visible samples: {stats.sample_count:,}\n"
             f"Visible range: {time_range}"
         )
 
     sheet_names = sorted({stats.sheet_name for stats in visible_stats}, key=str.casefold)
-    tag_names = [stats.tag_name for stats in visible_stats]
+    tag_names = [
+        _display_label_for_tag(stats.tag_name, display_labels_by_tag)
+        for stats in visible_stats
+    ]
     return (
         f"{workbook_name}\n"
         f"Sheets: {', '.join(sheet_names)}\n"
@@ -1094,6 +1111,17 @@ def _summarize_tag_names(tag_names: list[str]) -> str:
         return ", ".join(tag_names)
     visible = ", ".join(tag_names[:4])
     return f"{visible}, +{len(tag_names) - 4} more"
+
+
+def _display_label_for_tag(
+    tag_name: str,
+    display_labels_by_tag: dict[str, str] | None,
+) -> str:
+    if display_labels_by_tag is not None:
+        display_label = display_labels_by_tag.get(tag_name)
+        if isinstance(display_label, str) and display_label.strip():
+            return display_label.strip()
+    return tag_name
 
 
 def _clear_layout(layout) -> None:

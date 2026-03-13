@@ -1,8 +1,43 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+import polars as pl
+
+from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.session import SessionStore
 from wte_trend_viewer.ui.main_window import TrendViewerMainWindow
 from wte_trend_viewer.ui.widgets.hierarchy_tree import SearchableHierarchyTree
+from wte_trend_viewer.ui.widgets.trend_plot_widget import (
+    TrendPlotSeries,
+    TrendVisibleSeriesStats,
+)
+
+
+def _make_plot_series(tag_name: str) -> TrendPlotSeries:
+    timestamps = pl.Series(
+        "Timestamp",
+        [
+            datetime(2026, 1, 1, 0, 0, 0),
+            datetime(2026, 1, 1, 0, 5, 0),
+            datetime(2026, 1, 1, 0, 10, 0),
+        ],
+    )
+    series = TrendSeriesData(
+        tag_name=tag_name,
+        sheet_name="Process Data",
+        source_column=tag_name,
+        values=pl.Series(tag_name, [10.0, 15.0, 13.0]),
+    )
+    sheet = TrendSheetData(
+        name="Process Data",
+        timestamp_column="Timestamp",
+        timestamps=timestamps,
+        tag_series=(series,),
+        row_count=3,
+        column_count=2,
+    )
+    return TrendPlotSeries(sheet=sheet, series=series)
 
 
 def test_hierarchy_tree_selected_tag_names_keep_original_name(qapp) -> None:
@@ -79,3 +114,37 @@ def test_clearing_custom_name_restores_default_labels(qapp, tmp_path) -> None:
     assert imported_item is not None
     assert imported_item.text() == original_name
     assert hierarchy_tag.text(0) == original_name
+
+
+def test_legend_and_analytics_use_custom_label_with_unit(qapp, tmp_path) -> None:
+    window = TrendViewerMainWindow(
+        session_store=SessionStore(tmp_path),
+        restore_last_session=False,
+    )
+    original_name = "Process Data/TAG001"
+    custom_name = "TAG001 - Example temperature"
+    unit = "[C]"
+    plotted = _make_plot_series(original_name)
+
+    window._set_custom_name_for_tag(original_name, custom_name, persist=False)
+    window._assign_unit_to_tags([original_name], unit, persist=False)
+    window._update_legend_table([plotted])
+    window._current_visible_stats = [
+        TrendVisibleSeriesStats(
+            tag_name=original_name,
+            sheet_name="Process Data",
+            color="#6CB6FF",
+            sample_count=3,
+            latest_value=13.0,
+            minimum_value=10.0,
+            maximum_value=15.0,
+            average_value=12.67,
+        )
+    ]
+    window._current_cursor_stats = None
+    window._update_analytics_table()
+
+    assert window._legend_table is not None
+    assert window._legend_table.item(0, 0).text() == f"{custom_name} {unit}"
+    assert window._analytics_table is not None
+    assert window._analytics_table.item(0, 0).text() == f"{custom_name} {unit}"

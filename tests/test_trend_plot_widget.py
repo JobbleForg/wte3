@@ -9,6 +9,7 @@ import pytest
 from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
     TrendPlotSeries,
+    TrendVisibleSeriesStats,
     TrendPlotWidget,
     _build_summary_text,
     _clamp_x_range,
@@ -94,6 +95,32 @@ def test_summary_text_includes_empty_state_message() -> None:
     )
 
     assert "No live trend data loaded." in text
+
+
+def test_summary_text_prefers_display_labels_when_provided() -> None:
+    text = _build_summary_text(
+        workbook_name="Workbook",
+        visible_stats=[
+            TrendVisibleSeriesStats(
+                tag_name="Process Data/TAG001",
+                sheet_name="Process Data",
+                color="#6CB6FF",
+                sample_count=3,
+                latest_value=12.0,
+                minimum_value=10.0,
+                maximum_value=14.0,
+                average_value=12.0,
+            )
+        ],
+        x_min=0.0,
+        x_max=10.0,
+        display_labels_by_tag={
+            "Process Data/TAG001": "TAG001 - Example temperature [C]"
+        },
+    )
+
+    assert "TAG001 - Example temperature [C]" in text
+    assert "Process Data/TAG001" not in text
 
 
 def test_downsample_visible_slice_keeps_endpoints() -> None:

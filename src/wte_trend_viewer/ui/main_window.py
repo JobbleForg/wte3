@@ -1313,10 +1313,18 @@ class TrendViewerMainWindow(QMainWindow):
             plotted.series.tag_name: self._resolved_display_range(plotted)
             for plotted in plotted_series
         }
+        display_labels_by_tag = {
+            plotted.series.tag_name: self._display_label_for_tag(
+                plotted.series.tag_name,
+                include_unit=True,
+            )
+            for plotted in plotted_series
+        }
         self._trend_plot_widget.plot_series_group(
             workbook_name=self._loaded_workbook.source_path.name,
             plotted_series=plotted_series,
             display_ranges_by_tag=display_ranges_by_tag,
+            display_labels_by_tag=display_labels_by_tag,
         )
         self._update_plot_support_panels(plotted_series)
         if persist_selection:
@@ -1515,14 +1523,19 @@ class TrendViewerMainWindow(QMainWindow):
         return " | ".join(parts)
 
     def _hierarchy_tag_display_text(self, tag_name: str) -> str:
-        label = self._custom_name_for_tag(tag_name) or tag_name
+        return self._display_label_for_tag(tag_name, include_unit=True)
+
+    def _display_name_for_tag(self, tag_name: str) -> str:
+        return self._custom_name_for_tag(tag_name) or tag_name
+
+    def _display_label_for_tag(self, tag_name: str, *, include_unit: bool = False) -> str:
+        label = self._display_name_for_tag(tag_name)
+        if not include_unit:
+            return label
         unit = self._unit_for_tag(tag_name)
         if unit is None:
             return label
         return f"{label} {unit}"
-
-    def _display_label_for_tag(self, tag_name: str) -> str:
-        return self._custom_name_for_tag(tag_name) or tag_name
 
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
         self._update_legend_table(plotted_series)
@@ -1563,7 +1576,12 @@ class TrendViewerMainWindow(QMainWindow):
                 low_range, high_range = self._resolved_display_range(plotted)
                 tooltip = self._tag_tooltip_text(plotted.series.tag_name)
 
-                tag_item = QTableWidgetItem(self._display_label_for_tag(plotted.series.tag_name))
+                tag_item = QTableWidgetItem(
+                    self._display_label_for_tag(
+                        plotted.series.tag_name,
+                        include_unit=True,
+                    )
+                )
                 tag_item.setData(Qt.UserRole, plotted.series.tag_name)
                 tag_item.setForeground(color)
                 tag_item.setToolTip(tooltip)
@@ -1620,7 +1638,11 @@ class TrendViewerMainWindow(QMainWindow):
                 high_range=fallback_high,
             )
             self.statusBar().showMessage(
-                f"Display range for {tag_name} must be numeric with Low < High.",
+                (
+                    "Display range for "
+                    f"{self._display_label_for_tag(tag_name, include_unit=True)} "
+                    "must be numeric with Low < High."
+                ),
                 5000,
             )
             return
@@ -1676,7 +1698,9 @@ class TrendViewerMainWindow(QMainWindow):
         for row_index, stats in enumerate(self._current_visible_stats):
             self._analytics_table.insertRow(row_index)
             cursor_stats = cursor_stats_by_tag.get(stats.tag_name)
-            tag_item = QTableWidgetItem(self._display_label_for_tag(stats.tag_name))
+            tag_item = QTableWidgetItem(
+                self._display_label_for_tag(stats.tag_name, include_unit=True)
+            )
             tag_item.setToolTip(self._tag_tooltip_text(stats.tag_name))
             self._analytics_table.setItem(row_index, 0, tag_item)
             self._analytics_table.setItem(
