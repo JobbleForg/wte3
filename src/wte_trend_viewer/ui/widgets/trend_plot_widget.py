@@ -64,6 +64,7 @@ SCALE_PANEL_STRETCH_RESET_COLUMNS = 12
 HIGHLIGHT_DIM_ALPHA = 68
 TIME_MODE_DURATION = "duration"
 TIME_MODE_END = "end"
+FLOATING_LEGEND_CURSOR_HEIGHT_PX = 18.0
 DEFAULT_DURATION_PRESETS = (
     "15m",
     "30m",
@@ -194,6 +195,7 @@ class TrendPlotWidget(QWidget):
         self._shared_scale_decimal_places: int | None = None
         self._floating_legend_enabled = False
         self._floating_legend_show_cursor_data = False
+        self._floating_legend_follow_y = False
         self._floating_legend_html = ""
 
         layout = QVBoxLayout(self)
@@ -272,6 +274,7 @@ class TrendPlotWidget(QWidget):
         self._requested_time_range: tuple[float, float] | None = None
         self._pending_x_range: tuple[float, float] | None = None
         self._current_cursor_x: float | None = None
+        self._current_cursor_y: float | None = None
         self._highlighted_tag_names: set[str] = set()
         self._suspend_range_updates = False
         self._suspend_time_control_updates = False
@@ -496,6 +499,7 @@ class TrendPlotWidget(QWidget):
         floating_legend_show_cursor_data = bool(
             state.get("floating_legend_show_cursor_data", False)
         )
+        floating_legend_follow_y = bool(state.get("floating_legend_follow_y", False))
 
         start_epoch = _coerce_epoch(state.get("time_window_start_epoch"))
         end_epoch = _coerce_epoch(state.get("time_window_end_epoch"))
@@ -541,6 +545,10 @@ class TrendPlotWidget(QWidget):
             floating_legend_show_cursor_data,
             emit_state_change=False,
         )
+        self._set_floating_legend_follow_y(
+            floating_legend_follow_y,
+            emit_state_change=False,
+        )
 
     def time_selection_state(self) -> dict[str, object]:
         state: dict[str, object] = {
@@ -549,6 +557,7 @@ class TrendPlotWidget(QWidget):
             "shared_scale_decimal_places": self._shared_scale_decimal_places,
             "floating_legend_enabled": self._floating_legend_enabled,
             "floating_legend_show_cursor_data": self._floating_legend_show_cursor_data,
+            "floating_legend_follow_y": self._floating_legend_follow_y,
         }
 
         x_range = self._current_visible_range
@@ -1164,14 +1173,17 @@ class TrendPlotWidget(QWidget):
 
         cursor_point = view_box.mapSceneToView(scene_position)
         cursor_x = float(cursor_point.x())
-        if not np.isfinite(cursor_x):
+        cursor_y = float(cursor_point.y())
+        if not np.isfinite(cursor_x) or not np.isfinite(cursor_y):
             self._clear_cursor_state()
             return
 
-        self._set_cursor_position(cursor_x)
+        self._set_cursor_position(cursor_x, cursor_y=cursor_y)
 
-    def _set_cursor_position(self, cursor_x: float) -> None:
+    def _set_cursor_position(self, cursor_x: float, *, cursor_y: float | None = None) -> None:
         self._current_cursor_x = cursor_x
+        if cursor_y is not None and np.isfinite(cursor_y):
+            self._current_cursor_y = cursor_y
         self._cursor_line.setPos(cursor_x)
         self._cursor_line.show()
         self._cursor_label.setText(f"Cursor: {_format_timestamp(cursor_x)}")
@@ -1182,6 +1194,7 @@ class TrendPlotWidget(QWidget):
 
     def _clear_cursor_state(self) -> None:
         self._current_cursor_x = None
+        self._current_cursor_y = None
         self._cursor_line.hide()
         self._cursor_label.clear()
         self._cursor_label.hide()
@@ -1300,6 +1313,16 @@ class TrendPlotWidget(QWidget):
                 emit_state_change=True,
             )
         )
+
+        follow_y_action = menu.addAction("Follow on Y axis")
+        follow_y_action.setCheckable(True)
+        follow_y_action.setChecked(self._floating_legend_follow_y)
+        follow_y_action.toggled.connect(
+            lambda checked: self._set_floating_legend_follow_y(
+                checked,
+                emit_state_change=True,
+            )
+        )
         return menu
 
     def _bind_shared_scale_context_menu(self, widget: QWidget) -> None:
@@ -1379,6 +1402,22 @@ class TrendPlotWidget(QWidget):
         if emit_state_change:
             self._schedule_time_selection_state_changed()
 
+    def _set_floating_legend_follow_y(
+        self,
+        enabled: bool,
+        *,
+        emit_state_change: bool,
+    ) -> None:
+        normalized_enabled = bool(enabled)
+        if normalized_enabled == self._floating_legend_follow_y:
+            if self._floating_legend_enabled:
+                self._refresh_floating_legend_from_current_cursor()
+            return
+        self._floating_legend_follow_y = normalized_enabled
+        self._refresh_floating_legend_from_current_cursor()
+        if emit_state_change:
+            self._schedule_time_selection_state_changed()
+
     def _refresh_floating_legend_from_current_cursor(self) -> None:
         if self._current_cursor_x is None:
             self._hide_floating_legend()
@@ -1427,13 +1466,14 @@ class TrendPlotWidget(QWidget):
         )
         self._floating_legend_item.setHtml(self._floating_legend_html)
         self._floating_legend_item.setAnchor(
-            (1.0, 0.0)
-            if self._should_anchor_floating_legend_right(cursor_stats.cursor_timestamp)
-            else (0.0, 0.0)
+            (
+                1.0 if self._should_anchor_floating_legend_right(cursor_stats.cursor_timestamp) else 0.0,
+                0.0,
+            )
         )
         self._floating_legend_item.setPos(
             cursor_stats.cursor_timestamp,
-            DISPLAY_Y_MAX - 2.0,
+            self._floating_legend_y_position(),
         )
         self._floating_legend_item.show()
 
@@ -1446,6 +1486,19 @@ class TrendPlotWidget(QWidget):
             return False
         x_min, x_max = self._current_visible_range
         return cursor_x >= (x_min + x_max) / 2.0
+
+    def _floating_legend_y_position(self) -> float:
+        if not self._floating_legend_follow_y or self._current_cursor_y is None:
+            return DISPLAY_Y_MAX - 2.0
+        _, pixel_height = self._plot_view_box.viewPixelSize()
+        offset = abs(float(pixel_height)) * FLOATING_LEGEND_CURSOR_HEIGHT_PX * 2.0
+        return float(
+            np.clip(
+                self._current_cursor_y - offset,
+                DISPLAY_Y_MIN + 2.0,
+                DISPLAY_Y_MAX - 2.0,
+            )
+        )
 
 
 def _build_summary_text(

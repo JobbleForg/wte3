@@ -9,6 +9,7 @@ import pytest
 from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
     DISPLAY_Y_MAX,
+    FLOATING_LEGEND_CURSOR_HEIGHT_PX,
     PLOT_COLORS,
     TrendPlotSeries,
     TrendVisibleSeriesStats,
@@ -112,11 +113,14 @@ def test_plot_context_menu_reflects_floating_legend_state(qapp) -> None:
     assert [action.text() for action in actions] == [
         "Floating legend",
         "Show data at cursor time",
+        "Follow on Y axis",
     ]
     assert actions[0].isCheckable() is True
     assert actions[0].isChecked() is False
     assert actions[1].isCheckable() is True
     assert actions[1].isChecked() is False
+    assert actions[2].isCheckable() is True
+    assert actions[2].isChecked() is False
 
 
 def test_shared_scale_context_menu_reflects_decimal_setting(qapp) -> None:
@@ -157,6 +161,7 @@ def test_floating_legend_shows_cursor_time_values(qapp) -> None:
     assert widget._floating_legend_item.pos().y() == pytest.approx(DISPLAY_Y_MAX - 2.0)
     assert widget.time_selection_state()["floating_legend_enabled"] is True
     assert widget.time_selection_state()["floating_legend_show_cursor_data"] is True
+    assert widget.time_selection_state()["floating_legend_follow_y"] is False
 
     widget._toggle_time_controls_collapsed()
 
@@ -167,6 +172,35 @@ def test_floating_legend_shows_cursor_time_values(qapp) -> None:
 
     assert widget._navigation_controls_container.isHidden() is False
     assert widget.time_selection_state()["time_controls_collapsed"] is False
+
+
+def test_floating_legend_can_follow_cursor_y_position(qapp) -> None:
+    widget = TrendPlotWidget()
+    widget.resize(900, 600)
+    widget.show()
+    qapp.processEvents()
+    plotted_series = [
+        _make_named_plot_series("TagA", [10.0, 15.0, 13.0]),
+    ]
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=plotted_series)
+
+    widget._set_floating_legend_enabled(True, emit_state_change=False)
+    widget._set_floating_legend_follow_y(True, emit_state_change=False)
+    widget._set_cursor_position(datetime(2026, 1, 1, 0, 6, 0).timestamp(), cursor_y=42.0)
+    _, pixel_height = widget._plot_view_box.viewPixelSize()
+
+    assert widget._floating_legend_item.isVisible() is True
+    assert widget._floating_legend_item.pos().y() == pytest.approx(
+        42.0 - (abs(float(pixel_height)) * FLOATING_LEGEND_CURSOR_HEIGHT_PX * 2.0)
+    )
+    assert float(widget._floating_legend_item.anchor.y()) == pytest.approx(0.0)
+    assert widget.time_selection_state()["floating_legend_follow_y"] is True
+
+    widget._set_floating_legend_follow_y(False, emit_state_change=False)
+    widget._set_cursor_position(datetime(2026, 1, 1, 0, 6, 0).timestamp(), cursor_y=42.0)
+
+    assert widget._floating_legend_item.pos().y() == pytest.approx(DISPLAY_Y_MAX - 2.0)
+    assert widget.time_selection_state()["floating_legend_follow_y"] is False
 
 
 def test_shared_scale_decimal_places_updates_labels_and_roundtrips_state(qapp) -> None:
