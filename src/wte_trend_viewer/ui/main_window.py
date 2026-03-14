@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QToolBar,
     QTreeWidgetItem,
     QTreeWidgetItemIterator,
@@ -65,6 +66,376 @@ LEGEND_LOW_RANGE_COLUMN = 3
 LEGEND_HIGH_RANGE_COLUMN = 4
 LEGEND_COLOR_COLUMN = 5
 LEGEND_HIGHLIGHT_COLUMN = 6
+DETACHED_LEGEND_HIGHLIGHT_COLUMN = 5
+
+
+class _CollapsibleSection(QWidget):
+    def __init__(
+        self,
+        title_text: str,
+        *,
+        expanded: bool,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._expanded = expanded
+        self._content_widget: QWidget | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        header_label = QLabel(title_text, header)
+        header_layout.addWidget(header_label)
+        header_layout.addStretch(1)
+
+        self._toggle_button = QToolButton(header)
+        self._toggle_button.setAutoRaise(True)
+        self._toggle_button.clicked.connect(self._toggle_expanded)
+        header_layout.addWidget(self._toggle_button, alignment=Qt.AlignRight)
+
+        layout.addWidget(header)
+
+        self._content_container = QWidget(self)
+        self._content_layout = QVBoxLayout(self._content_container)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        layout.addWidget(self._content_container)
+
+        self.set_expanded(expanded)
+
+    def set_content_widget(self, widget: QWidget) -> None:
+        if self._content_widget is not None:
+            self._content_layout.removeWidget(self._content_widget)
+            self._content_widget.setParent(None)
+        self._content_widget = widget
+        self._content_layout.addWidget(widget)
+        self._content_container.setVisible(self._expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self._content_container.setVisible(self._expanded)
+        self._toggle_button.setArrowType(
+            Qt.UpArrow if self._expanded else Qt.DownArrow
+        )
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def _toggle_expanded(self) -> None:
+        self.set_expanded(not self._expanded)
+
+
+class _DetachedTrendWindow(QWidget):
+    def __init__(
+        self,
+        *,
+        title_text: str,
+        workbook_name: str,
+        plotted_series: list[TrendPlotSeries],
+        display_ranges_by_tag: dict[str, tuple[float, float]],
+        display_labels_by_tag: dict[str, str],
+        display_units_by_tag: dict[str, str],
+        series_colors_by_tag: dict[str, str],
+        highlighted_tag_names: list[str],
+        time_presets: list[str],
+        time_selection_state: dict[str, object],
+        pan_fraction: tuple[int, int],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setWindowTitle(title_text)
+        self.resize(1200, 720)
+        self._display_labels_by_tag = dict(display_labels_by_tag)
+        self._display_units_by_tag = dict(display_units_by_tag)
+        self._series_colors_by_tag = dict(series_colors_by_tag)
+        self._current_visible_stats: list[TrendVisibleSeriesStats] = []
+        self._current_cursor_stats: TrendCursorStats | None = None
+        self._legend_table: QTableWidget | None = None
+        self._analytics_table: QTableWidget | None = None
+        self._suspend_detached_legend_updates = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("Trend window", self)
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        self._trend_plot_widget = TrendPlotWidget(self)
+        self._trend_plot_widget.visibleStatsChanged.connect(
+            self._handle_plot_visible_stats_changed
+        )
+        self._trend_plot_widget.cursorStatsChanged.connect(
+            self._handle_plot_cursor_stats_changed
+        )
+        self._trend_plot_widget.set_time_presets(time_presets)
+        self._trend_plot_widget.set_pan_fraction(*pan_fraction)
+        self._trend_plot_widget.set_time_selection_state(time_selection_state)
+        self._trend_plot_widget.plot_series_group(
+            workbook_name=workbook_name,
+            plotted_series=plotted_series,
+            display_ranges_by_tag=display_ranges_by_tag,
+            display_labels_by_tag=display_labels_by_tag,
+            series_colors_by_tag=series_colors_by_tag,
+        )
+        self._trend_plot_widget.set_highlighted_tags(highlighted_tag_names)
+        layout.addWidget(self._trend_plot_widget, stretch=1)
+
+        details_tabs = QTabWidget(self)
+        details_tabs.addTab(
+            self._build_detached_legend_tab(
+                plotted_series,
+                display_ranges_by_tag,
+                highlighted_tag_names,
+            ),
+            "Legend",
+        )
+        details_tabs.addTab(self._build_detached_analytics_tab(), "Analytics")
+        details_tabs.addTab(self._build_detached_settings_tab(time_presets), "Settings")
+
+        self._details_section = _CollapsibleSection(
+            "Legend / Analytics / Settings",
+            expanded=False,
+            parent=self,
+        )
+        self._details_section.set_content_widget(details_tabs)
+        layout.addWidget(self._details_section)
+        self._update_detached_analytics_table()
+
+    def _build_detached_legend_tab(
+        self,
+        plotted_series: list[TrendPlotSeries],
+        display_ranges_by_tag: dict[str, tuple[float, float]],
+        highlighted_tag_names: list[str],
+    ) -> QWidget:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        self._legend_table = QTableWidget(0, 6, container)
+        self._legend_table.setHorizontalHeaderLabels(
+            ["Tag", "Sheet", "Unit", "Low Range", "High Range", "Highlight"]
+        )
+        self._legend_table.verticalHeader().setVisible(False)
+        self._legend_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._legend_table.setAlternatingRowColors(True)
+        self._legend_table.itemChanged.connect(self._handle_detached_legend_item_changed)
+        header = self._legend_table.horizontalHeader()
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(
+            self._show_detached_legend_header_context_menu
+        )
+        layout.addWidget(self._legend_table)
+
+        active_highlights = set(highlighted_tag_names)
+        self._suspend_detached_legend_updates = True
+        try:
+            for row_index, plotted in enumerate(plotted_series):
+                self._legend_table.insertRow(row_index)
+                tag_name = plotted.series.tag_name
+                tag_item = QTableWidgetItem(self._display_labels_by_tag.get(tag_name, tag_name))
+                tag_item.setForeground(
+                    QColor(
+                        self._series_colors_by_tag.get(
+                            tag_name,
+                            PLOT_COLORS[row_index % len(PLOT_COLORS)],
+                        )
+                    )
+                )
+                tag_item.setToolTip(tag_name)
+                tag_item.setFlags(tag_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 0, tag_item)
+
+                sheet_item = QTableWidgetItem(plotted.sheet.name)
+                sheet_item.setFlags(sheet_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 1, sheet_item)
+
+                unit_item = QTableWidgetItem(self._display_units_by_tag.get(tag_name, "-"))
+                unit_item.setFlags(unit_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 2, unit_item)
+
+                low_range, high_range = display_ranges_by_tag.get(tag_name, (0.0, 0.0))
+                low_item = QTableWidgetItem(_format_range_value(low_range))
+                low_item.setFlags(low_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 3, low_item)
+
+                high_item = QTableWidgetItem(_format_range_value(high_range))
+                high_item.setFlags(high_item.flags() & ~Qt.ItemIsEditable)
+                self._legend_table.setItem(row_index, 4, high_item)
+
+                highlight_item = QTableWidgetItem("")
+                highlight_item.setData(Qt.UserRole, tag_name)
+                highlight_item.setFlags(
+                    (highlight_item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
+                highlight_item.setCheckState(
+                    Qt.Checked if tag_name in active_highlights else Qt.Unchecked
+                )
+                highlight_item.setTextAlignment(Qt.AlignCenter)
+                self._legend_table.setItem(row_index, 5, highlight_item)
+        finally:
+            self._suspend_detached_legend_updates = False
+
+        self._legend_table.resizeColumnsToContents()
+        return container
+
+    def _build_detached_analytics_tab(self) -> QWidget:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        self._analytics_table = QTableWidget(0, 5, container)
+        self._analytics_table.setHorizontalHeaderLabels(
+            [
+                "Tag",
+                "Cursor Value",
+                "Window Min",
+                "Window Max",
+                "Window Avg",
+            ]
+        )
+        self._analytics_table.verticalHeader().setVisible(False)
+        self._analytics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._analytics_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self._analytics_table)
+        return container
+
+    def _build_detached_settings_tab(self, time_presets: list[str]) -> QWidget:
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        helper = QLabel(
+            "Detached views keep their own cursor, time window, and pan state. "
+            "These presets remain available in the bottom time controls.",
+            container,
+        )
+        helper.setWordWrap(True)
+        layout.addWidget(helper)
+
+        preset_list = QListWidget(container)
+        preset_list.setSelectionMode(QAbstractItemView.NoSelection)
+        for preset in time_presets:
+            preset_list.addItem(preset)
+        layout.addWidget(preset_list, stretch=1)
+        return container
+
+    def _handle_plot_visible_stats_changed(self, visible_stats: object) -> None:
+        if isinstance(visible_stats, list):
+            self._current_visible_stats = [
+                stats for stats in visible_stats if isinstance(stats, TrendVisibleSeriesStats)
+            ]
+        else:
+            self._current_visible_stats = []
+        self._update_detached_analytics_table()
+
+    def _handle_plot_cursor_stats_changed(self, cursor_stats: object) -> None:
+        if isinstance(cursor_stats, TrendCursorStats):
+            self._current_cursor_stats = cursor_stats
+        else:
+            self._current_cursor_stats = None
+        self._update_detached_analytics_table()
+
+    def _update_detached_analytics_table(self) -> None:
+        if self._analytics_table is None:
+            return
+
+        cursor_stats_by_tag: dict[str, TrendCursorSeriesStats] = {}
+        if self._current_cursor_stats is not None:
+            cursor_stats_by_tag = {
+                stats.tag_name: stats for stats in self._current_cursor_stats.series_stats
+            }
+
+        self._analytics_table.setRowCount(0)
+        for row_index, stats in enumerate(self._current_visible_stats):
+            self._analytics_table.insertRow(row_index)
+            cursor_stats = cursor_stats_by_tag.get(stats.tag_name)
+            tag_item = QTableWidgetItem(
+                self._display_labels_by_tag.get(stats.tag_name, stats.tag_name)
+            )
+            tag_item.setForeground(QColor(stats.color))
+            tag_item.setToolTip(stats.tag_name)
+            self._analytics_table.setItem(row_index, 0, tag_item)
+            self._analytics_table.setItem(
+                row_index,
+                1,
+                _build_cursor_value_item(cursor_stats),
+            )
+            self._analytics_table.setItem(
+                row_index,
+                2,
+                _build_numeric_item(stats.minimum_value),
+            )
+            self._analytics_table.setItem(row_index, 3, _build_numeric_item(stats.maximum_value))
+            self._analytics_table.setItem(row_index, 4, _build_numeric_item(stats.average_value))
+
+        self._analytics_table.resizeColumnsToContents()
+
+    def _handle_detached_legend_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._suspend_detached_legend_updates:
+            return
+        if item.column() != DETACHED_LEGEND_HIGHLIGHT_COLUMN:
+            return
+        if self._legend_table is None:
+            return
+
+        highlighted_tag_names: list[str] = []
+        for row_index in range(self._legend_table.rowCount()):
+            highlight_item = self._legend_table.item(row_index, DETACHED_LEGEND_HIGHLIGHT_COLUMN)
+            if highlight_item is None or highlight_item.checkState() != Qt.Checked:
+                continue
+            tag_name = str(highlight_item.data(Qt.UserRole) or "").strip()
+            if tag_name:
+                highlighted_tag_names.append(tag_name)
+
+        self._trend_plot_widget.set_highlighted_tags(highlighted_tag_names)
+
+    def _show_detached_legend_header_context_menu(self, position) -> None:
+        if self._legend_table is None:
+            return
+
+        header = self._legend_table.horizontalHeader()
+        if header.logicalIndexAt(position) != DETACHED_LEGEND_HIGHLIGHT_COLUMN:
+            return
+
+        menu = QMenu(header)
+        clear_action = menu.addAction("Clear all")
+        clear_action.setEnabled(any(self._detached_highlight_states()))
+        selected_action = menu.exec(header.mapToGlobal(position))
+        if selected_action is clear_action:
+            self._clear_detached_highlights()
+
+    def _clear_detached_highlights(self) -> None:
+        if self._legend_table is None:
+            return
+
+        self._suspend_detached_legend_updates = True
+        try:
+            for row_index in range(self._legend_table.rowCount()):
+                highlight_item = self._legend_table.item(row_index, DETACHED_LEGEND_HIGHLIGHT_COLUMN)
+                if highlight_item is not None:
+                    highlight_item.setCheckState(Qt.Unchecked)
+        finally:
+            self._suspend_detached_legend_updates = False
+
+        self._trend_plot_widget.set_highlighted_tags([])
+
+    def _detached_highlight_states(self) -> list[bool]:
+        if self._legend_table is None:
+            return []
+        return [
+            (self._legend_table.item(row_index, DETACHED_LEGEND_HIGHLIGHT_COLUMN) is not None)
+            and self._legend_table.item(row_index, DETACHED_LEGEND_HIGHLIGHT_COLUMN).checkState() == Qt.Checked
+            for row_index in range(self._legend_table.rowCount())
+        ]
 
 
 class TrendViewerMainWindow(QMainWindow):
@@ -128,6 +499,7 @@ class TrendViewerMainWindow(QMainWindow):
         self._current_visible_stats: list[TrendVisibleSeriesStats] = []
         self._current_cursor_stats: TrendCursorStats | None = None
         self._current_preview_tag_names: list[str] = []
+        self._detached_trend_windows: list[_DetachedTrendWindow] = []
 
         self._build_toolbar()
         self.addDockWidget(Qt.LeftDockWidgetArea, self._build_left_workspace_dock())
@@ -140,6 +512,7 @@ class TrendViewerMainWindow(QMainWindow):
             self._persist_last_session(show_errors=False)
 
         self._sync_workbook_actions()
+        self._sync_trend_window_actions()
         self._sync_subcategory_button_state()
         self._update_trend_summary()
 
@@ -175,6 +548,11 @@ class TrendViewerMainWindow(QMainWindow):
         self._clear_imported_tags_action = QAction("Clear Imported Tags", self)
         self._clear_imported_tags_action.triggered.connect(self._clear_imported_tags)
         toolbar.addAction(self._clear_imported_tags_action)
+
+        self._pop_out_trend_action = QAction("Pop Out Trend", self)
+        self._pop_out_trend_action.setEnabled(False)
+        self._pop_out_trend_action.triggered.connect(self._pop_out_current_trend_window)
+        toolbar.addAction(self._pop_out_trend_action)
 
         toolbar.addSeparator()
 
@@ -847,15 +1225,11 @@ class TrendViewerMainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        self._analytics_table = QTableWidget(0, 9, container)
+        self._analytics_table = QTableWidget(0, 5, container)
         self._analytics_table.setHorizontalHeaderLabels(
             [
                 "Tag",
-                "Prev Value",
                 "Cursor Value",
-                "Interp Value",
-                "Next Value",
-                "Visible Last",
                 "Window Min",
                 "Window Max",
                 "Window Avg",
@@ -980,8 +1354,7 @@ class TrendViewerMainWindow(QMainWindow):
             return False
 
         imported_tags = list(self._loaded_workbook.available_tags)
-        self._session.settings_state["last_workbook_path"] = str(result.source_path)
-        self._session.settings_state["last_workbook_name"] = result.source_path.name
+        self._store_last_workbook_location(result.source_path)
         self._session.settings_state["loaded_sheet_names"] = selected_data_sheet_names
         self.set_imported_tags(imported_tags)
         self._sync_workbook_actions()
@@ -1062,8 +1435,15 @@ class TrendViewerMainWindow(QMainWindow):
             return
 
         self._apply_session(session)
-        self._restore_live_workbook_data(show_errors=False)
-        self.statusBar().showMessage("Restored last session.", 4000)
+        restored = self._restore_live_workbook_data(show_errors=False)
+        self._persist_last_session(show_errors=False)
+        if restored or not self._session.imported_tags:
+            self.statusBar().showMessage("Restored last session.", 4000)
+        else:
+            self.statusBar().showMessage(
+                "Restored last session layout, but the workbook could not be reopened automatically.",
+                5000,
+            )
 
     def _clear_imported_tags(self) -> None:
         self._clear_loaded_workbook_data()
@@ -1151,6 +1531,7 @@ class TrendViewerMainWindow(QMainWindow):
             return False
 
         self._loaded_workbook = loaded_workbook
+        self._store_last_workbook_location(loaded_workbook.source_path)
         live_tags = list(loaded_workbook.available_tags)
         tags_changed = live_tags != self._imported_tags_list.tags()
         self.set_imported_tags(live_tags, persist=False)
@@ -1358,6 +1739,69 @@ class TrendViewerMainWindow(QMainWindow):
         if persist_selection:
             self._handle_workspace_changed()
         return True
+
+    def _pop_out_current_trend_window(self) -> None:
+        if (
+            self._trend_plot_widget is None
+            or self._loaded_workbook is None
+            or not self._current_plotted_series
+        ):
+            self.statusBar().showMessage("Select plotted tags before popping out a trend.", 3000)
+            return
+
+        display_ranges_by_tag = {
+            plotted.series.tag_name: self._resolved_display_range(plotted)
+            for plotted in self._current_plotted_series
+        }
+        display_labels_by_tag = {
+            plotted.series.tag_name: self._display_label_for_tag(
+                plotted.series.tag_name,
+                include_unit=True,
+            )
+            for plotted in self._current_plotted_series
+        }
+        display_units_by_tag = {
+            plotted.series.tag_name: display_unit_text(self._unit_for_tag(plotted.series.tag_name)) or "-"
+            for plotted in self._current_plotted_series
+        }
+        detached_window = _DetachedTrendWindow(
+            title_text=self._build_detached_trend_window_title(),
+            workbook_name=self._loaded_workbook.source_path.name,
+            plotted_series=list(self._current_plotted_series),
+            display_ranges_by_tag=display_ranges_by_tag,
+            display_labels_by_tag=display_labels_by_tag,
+            display_units_by_tag=display_units_by_tag,
+            series_colors_by_tag=dict(self._current_plot_colors_by_tag),
+            highlighted_tag_names=self._active_highlighted_tag_names(),
+            time_presets=self._stored_time_presets(),
+            time_selection_state=self._trend_plot_widget.time_selection_state(),
+            pan_fraction=self._trend_plot_widget.pan_fraction(),
+            parent=None,
+        )
+        detached_window.destroyed.connect(
+            lambda *_args, window=detached_window: self._forget_detached_trend_window(window)
+        )
+        self._detached_trend_windows.append(detached_window)
+        detached_window.show()
+        self.statusBar().showMessage("Opened detached trend window.", 3000)
+
+    def _build_detached_trend_window_title(self) -> str:
+        if self._loaded_workbook is None:
+            return "Detached Trend"
+
+        label = (
+            self._display_label_for_tag(self._current_preview_tag_names[0], include_unit=True)
+            if len(self._current_preview_tag_names) == 1
+            else f"{len(self._current_preview_tag_names)} tags"
+        )
+        return f"Detached Trend - {self._loaded_workbook.source_path.name} - {label}"
+
+    def _forget_detached_trend_window(self, window: _DetachedTrendWindow) -> None:
+        self._detached_trend_windows = [
+            existing_window
+            for existing_window in self._detached_trend_windows
+            if existing_window is not window
+        ]
 
     def _restore_preview_tag_selection(self) -> None:
         preview_tag_names = self._saved_preview_tag_names()
@@ -1678,6 +2122,7 @@ class TrendViewerMainWindow(QMainWindow):
     def _update_plot_support_panels(self, plotted_series: list[TrendPlotSeries]) -> None:
         self._update_legend_table(plotted_series)
         self._update_analytics_table()
+        self._sync_trend_window_actions()
 
     def _handle_plot_visible_stats_changed(self, visible_stats: object) -> None:
         if isinstance(visible_stats, list):
@@ -1914,50 +2359,59 @@ class TrendViewerMainWindow(QMainWindow):
             self._analytics_table.setItem(
                 row_index,
                 1,
-                _build_numeric_item(
-                    cursor_stats.previous_value if cursor_stats is not None else None,
-                    timestamp=cursor_stats.previous_timestamp if cursor_stats is not None else None,
-                    timestamp_label="Previous sample",
-                ),
+                _build_cursor_value_item(cursor_stats),
             )
             self._analytics_table.setItem(
                 row_index,
                 2,
-                _build_numeric_item(
-                    cursor_stats.cursor_value if cursor_stats is not None else None,
-                    timestamp=cursor_stats.sample_timestamp if cursor_stats is not None else None,
-                    timestamp_label="Nearest sample",
-                ),
+                _build_numeric_item(stats.minimum_value),
             )
-            self._analytics_table.setItem(
-                row_index,
-                3,
-                _build_numeric_item(
-                    cursor_stats.interpolated_value if cursor_stats is not None else None,
-                    tooltip=_build_interpolation_tooltip(cursor_stats),
-                ),
-            )
-            self._analytics_table.setItem(
-                row_index,
-                4,
-                _build_numeric_item(
-                    cursor_stats.next_value if cursor_stats is not None else None,
-                    timestamp=cursor_stats.next_timestamp if cursor_stats is not None else None,
-                    timestamp_label="Next sample",
-                ),
-            )
-            self._analytics_table.setItem(row_index, 5, _build_numeric_item(stats.latest_value))
-            self._analytics_table.setItem(row_index, 6, _build_numeric_item(stats.minimum_value))
-            self._analytics_table.setItem(row_index, 7, _build_numeric_item(stats.maximum_value))
-            self._analytics_table.setItem(row_index, 8, _build_numeric_item(stats.average_value))
+            self._analytics_table.setItem(row_index, 3, _build_numeric_item(stats.maximum_value))
+            self._analytics_table.setItem(row_index, 4, _build_numeric_item(stats.average_value))
 
         self._analytics_table.resizeColumnsToContents()
 
     def _last_workbook_path(self) -> Path | None:
         value = self._session.settings_state.get("last_workbook_path")
+        stored_path: Path | None = None
         if isinstance(value, str) and value.strip():
-            return Path(value)
+            stored_path = Path(value)
+            if stored_path.exists():
+                return stored_path
+
+        relative_value = self._session.settings_state.get("last_workbook_relative_path")
+        if isinstance(relative_value, str) and relative_value.strip():
+            relative_path = Path(relative_value)
+            for base_dir in _session_workbook_search_roots():
+                candidate = base_dir / relative_path
+                if candidate.exists():
+                    return candidate
+
+        workbook_name = self._session.settings_state.get("last_workbook_name")
+        if isinstance(workbook_name, str) and workbook_name.strip():
+            for base_dir in _session_workbook_search_roots():
+                candidate = base_dir / workbook_name.strip()
+                if candidate.exists():
+                    return candidate
+
+        if stored_path is not None:
+            return stored_path
+
+        if isinstance(relative_value, str) and relative_value.strip():
+            search_roots = _session_workbook_search_roots()
+            if search_roots:
+                return search_roots[0] / Path(relative_value)
         return None
+
+    def _store_last_workbook_location(self, source_path: Path) -> None:
+        resolved_source_path = source_path.resolve()
+        self._session.settings_state["last_workbook_path"] = str(resolved_source_path)
+        self._session.settings_state["last_workbook_name"] = resolved_source_path.name
+        relative_path = _session_relative_workbook_path(resolved_source_path)
+        if relative_path is None:
+            self._session.settings_state.pop("last_workbook_relative_path", None)
+        else:
+            self._session.settings_state["last_workbook_relative_path"] = relative_path.as_posix()
 
     def _selected_sheet_names(self) -> list[str]:
         value = self._session.settings_state.get("loaded_sheet_names", [])
@@ -1970,6 +2424,9 @@ class TrendViewerMainWindow(QMainWindow):
         self._select_sheets_action.setEnabled(has_workbook)
         if self._select_sheets_button is not None:
             self._select_sheets_button.setEnabled(has_workbook)
+
+    def _sync_trend_window_actions(self) -> None:
+        self._pop_out_trend_action.setEnabled(bool(self._current_plotted_series))
 
     def _sync_subcategory_button_state(self) -> None:
         if self._add_subcategory_button is None:
@@ -2098,6 +2555,16 @@ def _build_numeric_item(
     return item
 
 
+def _build_cursor_value_item(cursor_stats: TrendCursorSeriesStats | None) -> QTableWidgetItem:
+    value, timestamp, timestamp_label, tooltip = _resolved_cursor_display_value(cursor_stats)
+    return _build_numeric_item(
+        value,
+        timestamp=timestamp,
+        timestamp_label=timestamp_label,
+        tooltip=tooltip,
+    )
+
+
 def _format_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2128,4 +2595,49 @@ def _build_interpolation_tooltip(cursor_stats: TrendCursorSeriesStats | None) ->
             return "Interpolation: nearest-sample fallback"
         return f"Interpolation: nearest-sample fallback at {_format_timestamp(timestamp)}"
 
+    return None
+
+
+def _resolved_cursor_display_value(
+    cursor_stats: TrendCursorSeriesStats | None,
+) -> tuple[float | None, float | None, str, str | None]:
+    if cursor_stats is None:
+        return None, None, "Sample", None
+
+    if cursor_stats.interpolated_value is not None:
+        return (
+            cursor_stats.interpolated_value,
+            None,
+            "Sample",
+            _build_interpolation_tooltip(cursor_stats),
+        )
+
+    if cursor_stats.cursor_value is not None:
+        return cursor_stats.cursor_value, cursor_stats.sample_timestamp, "Nearest sample", None
+
+    if cursor_stats.previous_value is not None:
+        return cursor_stats.previous_value, cursor_stats.previous_timestamp, "Previous sample", None
+
+    if cursor_stats.next_value is not None:
+        return cursor_stats.next_value, cursor_stats.next_timestamp, "Next sample", None
+
+    return None, None, "Sample", None
+
+
+def _session_workbook_search_roots() -> tuple[Path, ...]:
+    search_roots: list[Path] = []
+    for candidate in (Path.cwd(), Path(__file__).resolve().parents[3]):
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate not in search_roots:
+            search_roots.append(resolved_candidate)
+    return tuple(search_roots)
+
+
+def _session_relative_workbook_path(source_path: Path) -> Path | None:
+    resolved_source_path = source_path.resolve()
+    for search_root in _session_workbook_search_roots():
+        try:
+            return resolved_source_path.relative_to(search_root)
+        except ValueError:
+            continue
     return None

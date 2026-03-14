@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import html
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,9 +19,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -187,6 +190,11 @@ class TrendPlotWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._time_controls_collapsed = False
+        self._shared_scale_decimal_places: int | None = None
+        self._floating_legend_enabled = False
+        self._floating_legend_show_cursor_data = False
+        self._floating_legend_html = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -224,6 +232,11 @@ class TrendPlotWidget(QWidget):
         self._shared_scale_bottom_layout = QGridLayout(self._shared_scale_bottom)
         self._shared_scale_bottom_layout.setContentsMargins(0, 0, 0, 0)
         self._shared_scale_bottom_layout.setSpacing(2)
+
+        self._bind_shared_scale_context_menu(self._shared_scale_panel)
+        self._bind_shared_scale_context_menu(self._shared_scale_top)
+        self._bind_shared_scale_context_menu(self._shared_scale_mid)
+        self._bind_shared_scale_context_menu(self._shared_scale_bottom)
 
         scale_layout.addWidget(self._shared_scale_top)
         scale_layout.addStretch(1)
@@ -280,6 +293,14 @@ class TrendPlotWidget(QWidget):
         )
         self._cursor_line.setZValue(1_000)
         self._cursor_line.hide()
+        self._floating_legend_item = pg.TextItem(
+            html="",
+            anchor=(0.0, 0.0),
+            fill=pg.mkBrush(18, 24, 31, 220),
+            border=pg.mkPen("#46505A"),
+        )
+        self._floating_legend_item.setZValue(1_100)
+        self._floating_legend_item.hide()
 
         self._plot_widget.installEventFilter(self)
         self._plot_widget.viewport().setMouseTracking(True)
@@ -297,97 +318,129 @@ class TrendPlotWidget(QWidget):
 
     def _build_navigation_row(self) -> QWidget:
         container = QWidget(self)
-        layout = QHBoxLayout(container)
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
-        self._visible_range_label = QLabel(container)
+        status_row = QWidget(container)
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(8)
+
+        self._visible_range_label = QLabel(status_row)
         self._visible_range_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._visible_range_label.setMinimumWidth(312)
-        self._visible_range_label.setMaximumWidth(312)
         self._visible_range_label.hide()
-        layout.addWidget(self._visible_range_label)
+        status_layout.addWidget(self._visible_range_label, stretch=1)
 
-        layout.addStretch(1)
-
-        self._cursor_label = QLabel(container)
+        self._cursor_label = QLabel(status_row)
         self._cursor_label.setAlignment(Qt.AlignCenter)
-        self._cursor_label.setMinimumWidth(260)
         self._cursor_label.hide()
-        layout.addWidget(self._cursor_label, stretch=1)
+        status_layout.addWidget(self._cursor_label, stretch=1)
 
-        layout.addStretch(1)
+        self._time_controls_toggle_button = QToolButton(status_row)
+        self._time_controls_toggle_button.setAutoRaise(True)
+        self._time_controls_toggle_button.clicked.connect(self._toggle_time_controls_collapsed)
+        status_layout.addWidget(self._time_controls_toggle_button, alignment=Qt.AlignRight)
 
-        self._time_start_edit = QDateTimeEdit(container)
+        layout.addWidget(status_row)
+
+        self._navigation_controls_container = QWidget(container)
+        navigation_controls_layout = QVBoxLayout(self._navigation_controls_container)
+        navigation_controls_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_controls_layout.setSpacing(6)
+
+        time_controls_row = QWidget(self._navigation_controls_container)
+        time_controls_layout = QHBoxLayout(time_controls_row)
+        time_controls_layout.setContentsMargins(0, 0, 0, 0)
+        time_controls_layout.setSpacing(8)
+
+        self._time_start_edit = QDateTimeEdit(time_controls_row)
         self._configure_datetime_edit(self._time_start_edit)
-        self._time_start_edit.setFixedWidth(172)
-        layout.addWidget(self._time_start_edit)
+        self._time_start_edit.setMinimumWidth(140)
+        self._time_start_edit.setMaximumWidth(172)
+        time_controls_layout.addWidget(self._time_start_edit)
 
-        self._time_mode_combo = QComboBox(container)
+        self._time_mode_combo = QComboBox(time_controls_row)
         self._time_mode_combo.addItem("Duration", TIME_MODE_DURATION)
         self._time_mode_combo.addItem("End", TIME_MODE_END)
-        self._time_mode_combo.setFixedWidth(108)
+        self._time_mode_combo.setMinimumWidth(86)
+        self._time_mode_combo.setMaximumWidth(108)
         self._time_mode_combo.currentIndexChanged.connect(self._handle_time_mode_changed)
-        layout.addWidget(self._time_mode_combo)
+        time_controls_layout.addWidget(self._time_mode_combo)
 
-        self._time_value_stack = QStackedWidget(container)
-        self._time_value_stack.setFixedWidth(196)
+        self._time_value_stack = QStackedWidget(time_controls_row)
+        self._time_value_stack.setMinimumWidth(150)
+        self._time_value_stack.setMaximumWidth(196)
 
-        self._time_duration_input = QLineEdit(container)
+        self._time_duration_input = QLineEdit(time_controls_row)
         self._time_duration_input.setPlaceholderText("1h 30m")
         self._time_duration_input.setClearButtonEnabled(True)
         self._time_duration_input.returnPressed.connect(self._apply_time_selection_from_controls)
         self._time_value_stack.addWidget(self._time_duration_input)
 
-        self._time_end_edit = QDateTimeEdit(container)
+        self._time_end_edit = QDateTimeEdit(time_controls_row)
         self._configure_datetime_edit(self._time_end_edit)
         self._time_value_stack.addWidget(self._time_end_edit)
-        layout.addWidget(self._time_value_stack)
+        time_controls_layout.addWidget(self._time_value_stack)
 
-        self._time_preset_combo = QComboBox(container)
+        self._time_preset_combo = QComboBox(time_controls_row)
         self._time_preset_combo.setPlaceholderText("Preset")
         self._time_preset_combo.setCurrentIndex(-1)
-        self._time_preset_combo.setFixedWidth(120)
+        self._time_preset_combo.setMinimumWidth(90)
+        self._time_preset_combo.setMaximumWidth(120)
         self._time_preset_combo.currentIndexChanged.connect(self._handle_time_preset_changed)
-        layout.addWidget(self._time_preset_combo)
+        time_controls_layout.addWidget(self._time_preset_combo)
 
-        self._apply_time_selection_button = QPushButton("Apply", container)
-        self._apply_time_selection_button.setFixedWidth(78)
+        self._apply_time_selection_button = QPushButton("Apply", time_controls_row)
+        self._apply_time_selection_button.setMinimumWidth(68)
+        self._apply_time_selection_button.setMaximumWidth(78)
         self._apply_time_selection_button.clicked.connect(self._apply_time_selection_from_controls)
-        layout.addWidget(self._apply_time_selection_button)
+        time_controls_layout.addWidget(self._apply_time_selection_button)
+        time_controls_layout.addStretch(1)
+        navigation_controls_layout.addWidget(time_controls_row)
 
-        self._pan_numerator_spin = QSpinBox(container)
+        pan_controls_row = QWidget(self._navigation_controls_container)
+        pan_controls_layout = QHBoxLayout(pan_controls_row)
+        pan_controls_layout.setContentsMargins(0, 0, 0, 0)
+        pan_controls_layout.setSpacing(8)
+        pan_controls_layout.addStretch(1)
+
+        self._pan_numerator_spin = QSpinBox(pan_controls_row)
         self._pan_numerator_spin.setRange(1, 100)
         self._pan_numerator_spin.setValue(1)
         self._pan_numerator_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self._pan_numerator_spin.setAlignment(Qt.AlignCenter)
-        self._pan_numerator_spin.setFixedWidth(52)
+        self._pan_numerator_spin.setFixedWidth(44)
         self._pan_numerator_spin.valueChanged.connect(self._handle_pan_fraction_changed)
-        layout.addWidget(self._pan_numerator_spin)
+        pan_controls_layout.addWidget(self._pan_numerator_spin)
 
-        slash_label = QLabel("/", container)
+        slash_label = QLabel("/", pan_controls_row)
         slash_label.setAlignment(Qt.AlignCenter)
         slash_label.setFixedWidth(10)
-        layout.addWidget(slash_label)
+        pan_controls_layout.addWidget(slash_label)
 
-        self._pan_denominator_spin = QSpinBox(container)
+        self._pan_denominator_spin = QSpinBox(pan_controls_row)
         self._pan_denominator_spin.setRange(1, 100)
         self._pan_denominator_spin.setValue(4)
         self._pan_denominator_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self._pan_denominator_spin.setAlignment(Qt.AlignCenter)
-        self._pan_denominator_spin.setFixedWidth(52)
+        self._pan_denominator_spin.setFixedWidth(44)
         self._pan_denominator_spin.valueChanged.connect(self._handle_pan_fraction_changed)
-        layout.addWidget(self._pan_denominator_spin)
+        pan_controls_layout.addWidget(self._pan_denominator_spin)
 
-        self._pan_left_button = QPushButton("<", container)
-        self._pan_left_button.setFixedWidth(40)
+        self._pan_left_button = QPushButton("<", pan_controls_row)
+        self._pan_left_button.setFixedWidth(36)
         self._pan_left_button.clicked.connect(self._pan_left_by_fraction)
-        layout.addWidget(self._pan_left_button)
+        pan_controls_layout.addWidget(self._pan_left_button)
 
-        self._pan_right_button = QPushButton(">", container)
-        self._pan_right_button.setFixedWidth(40)
+        self._pan_right_button = QPushButton(">", pan_controls_row)
+        self._pan_right_button.setFixedWidth(36)
         self._pan_right_button.clicked.connect(self._pan_right_by_fraction)
-        layout.addWidget(self._pan_right_button)
+        pan_controls_layout.addWidget(self._pan_right_button)
+
+        navigation_controls_layout.addWidget(pan_controls_row)
+        layout.addWidget(self._navigation_controls_container)
+        self._apply_time_controls_collapsed_state()
 
         return container
 
@@ -435,6 +488,14 @@ class TrendPlotWidget(QWidget):
         mode = str(state.get("time_selection_mode", TIME_MODE_DURATION)).strip().lower()
         if mode not in {TIME_MODE_DURATION, TIME_MODE_END}:
             mode = TIME_MODE_DURATION
+        controls_collapsed = bool(state.get("time_controls_collapsed", False))
+        shared_scale_decimal_places = _coerce_scale_decimal_places(
+            state.get("shared_scale_decimal_places")
+        )
+        floating_legend_enabled = bool(state.get("floating_legend_enabled", False))
+        floating_legend_show_cursor_data = bool(
+            state.get("floating_legend_show_cursor_data", False)
+        )
 
         start_epoch = _coerce_epoch(state.get("time_window_start_epoch"))
         end_epoch = _coerce_epoch(state.get("time_window_end_epoch"))
@@ -467,10 +528,27 @@ class TrendPlotWidget(QWidget):
             self._requested_time_range = (start_epoch, end_epoch)
         else:
             self._requested_time_range = None
+        self._set_time_controls_collapsed(controls_collapsed, emit_state_change=False)
+        self._set_shared_scale_decimal_places(
+            shared_scale_decimal_places,
+            emit_state_change=False,
+        )
+        self._set_floating_legend_enabled(
+            floating_legend_enabled,
+            emit_state_change=False,
+        )
+        self._set_floating_legend_show_cursor_data(
+            floating_legend_show_cursor_data,
+            emit_state_change=False,
+        )
 
     def time_selection_state(self) -> dict[str, object]:
         state: dict[str, object] = {
             "time_selection_mode": self._current_time_mode(),
+            "time_controls_collapsed": self._time_controls_collapsed,
+            "shared_scale_decimal_places": self._shared_scale_decimal_places,
+            "floating_legend_enabled": self._floating_legend_enabled,
+            "floating_legend_show_cursor_data": self._floating_legend_show_cursor_data,
         }
 
         x_range = self._current_visible_range
@@ -496,6 +574,7 @@ class TrendPlotWidget(QWidget):
         self._summary_label.show()
         self._clear_cursor_state()
         self._clear_visible_range_state()
+        self._hide_floating_legend()
 
         self._reset_plot_item()
         self._set_shared_scale_labels([])
@@ -654,9 +733,19 @@ class TrendPlotWidget(QWidget):
         target_points = max(MIN_VISIBLE_SAMPLES, int(self._plot_widget.width() * 1.5))
 
         for prepared in self._prepared_series:
-            start_index, end_index = _visible_index_bounds(prepared.x_values, x_min, x_max)
-            visible_x = prepared.x_values[start_index:end_index]
-            visible_y = prepared.y_values[start_index:end_index]
+            draw_start_index, draw_end_index = _visible_index_bounds(
+                prepared.x_values,
+                x_min,
+                x_max,
+            )
+            stats_start_index, stats_end_index = _visible_stats_index_bounds(
+                prepared.x_values,
+                x_min,
+                x_max,
+            )
+            visible_x = prepared.x_values[draw_start_index:draw_end_index]
+            visible_y = prepared.y_values[draw_start_index:draw_end_index]
+            stats_y = prepared.y_values[stats_start_index:stats_end_index]
 
             if visible_x.size == 0:
                 prepared.curve.setData([], [])
@@ -688,18 +777,32 @@ class TrendPlotWidget(QWidget):
                 ),
             )
 
-            visible_stats.append(
-                TrendVisibleSeriesStats(
-                    tag_name=prepared.plotted.series.tag_name,
-                    sheet_name=prepared.plotted.sheet.name,
-                    color=prepared.color,
-                    sample_count=int(visible_y.size),
-                    latest_value=float(visible_y[-1]),
-                    minimum_value=float(np.min(visible_y)),
-                    maximum_value=float(np.max(visible_y)),
-                    average_value=float(np.mean(visible_y)),
+            if stats_y.size == 0:
+                visible_stats.append(
+                    TrendVisibleSeriesStats(
+                        tag_name=prepared.plotted.series.tag_name,
+                        sheet_name=prepared.plotted.sheet.name,
+                        color=prepared.color,
+                        sample_count=0,
+                        latest_value=None,
+                        minimum_value=None,
+                        maximum_value=None,
+                        average_value=None,
+                    )
                 )
-            )
+            else:
+                visible_stats.append(
+                    TrendVisibleSeriesStats(
+                        tag_name=prepared.plotted.series.tag_name,
+                        sheet_name=prepared.plotted.sheet.name,
+                        color=prepared.color,
+                        sample_count=int(stats_y.size),
+                        latest_value=float(stats_y[-1]),
+                        minimum_value=float(np.min(stats_y)),
+                        maximum_value=float(np.max(stats_y)),
+                        average_value=float(np.mean(stats_y)),
+                    )
+                )
 
         if preserved_y_range is None:
             self._apply_visible_y_range()
@@ -890,6 +993,29 @@ class TrendPlotWidget(QWidget):
     def _emit_time_selection_state_changed(self) -> None:
         self.timeSelectionStateChanged.emit()
 
+    def _toggle_time_controls_collapsed(self) -> None:
+        self._set_time_controls_collapsed(
+            not self._time_controls_collapsed,
+            emit_state_change=True,
+        )
+
+    def _set_time_controls_collapsed(self, collapsed: bool, *, emit_state_change: bool) -> None:
+        normalized_collapsed = bool(collapsed)
+        if normalized_collapsed == self._time_controls_collapsed:
+            return
+        self._time_controls_collapsed = normalized_collapsed
+        self._apply_time_controls_collapsed_state()
+        if emit_state_change:
+            self._schedule_time_selection_state_changed()
+
+    def _apply_time_controls_collapsed_state(self) -> None:
+        if hasattr(self, "_navigation_controls_container"):
+            self._navigation_controls_container.setVisible(not self._time_controls_collapsed)
+        if hasattr(self, "_time_controls_toggle_button"):
+            self._time_controls_toggle_button.setArrowType(
+                Qt.DownArrow if self._time_controls_collapsed else Qt.UpArrow
+            )
+
     def _reset_plot_item(self) -> None:
         plot_item = self._plot_widget.getPlotItem()
         plot_item.clear()
@@ -912,6 +1038,8 @@ class TrendPlotWidget(QWidget):
         plot_item.setLabel("bottom", "Time")
         self._cursor_line.hide()
         plot_item.addItem(self._cursor_line, ignoreBounds=True)
+        self._floating_legend_item.hide()
+        plot_item.addItem(self._floating_legend_item, ignoreBounds=True)
 
     def _apply_highlight_state(self) -> None:
         active_highlighted_tags = self._active_highlighted_tag_names()
@@ -925,6 +1053,8 @@ class TrendPlotWidget(QWidget):
             prepared.curve.setPen(pg.mkPen(_series_qcolor(prepared.color, dimmed=is_dimmed), width=2))
 
         self._set_shared_scale_labels(self._prepared_series)
+        if self._current_cursor_x is not None:
+            self._update_floating_legend(self._build_cursor_stats(self._current_cursor_x))
 
     def _active_highlighted_tag_names(self) -> set[str]:
         prepared_tag_names = {
@@ -953,6 +1083,7 @@ class TrendPlotWidget(QWidget):
         column_widths = _shared_scale_column_widths(
             prepared_series,
             self._shared_scale_panel.fontMetrics(),
+            self._shared_scale_decimal_places,
         )
         self._shared_scale_panel.setFixedWidth(_shared_scale_panel_width(column_widths))
         _configure_scale_grid(self._shared_scale_top_layout, column_widths)
@@ -1010,11 +1141,15 @@ class TrendPlotWidget(QWidget):
         tooltip: str,
         dimmed: bool = False,
     ) -> QLabel:
-        label = QLabel(_format_scale_value(value), self._shared_scale_panel)
+        label = QLabel(
+            _format_scale_value(value, self._shared_scale_decimal_places),
+            self._shared_scale_panel,
+        )
         label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         label.setStyleSheet(f"color: {_qcolor_to_css(_series_qcolor(color, dimmed=dimmed))};")
         label.setToolTip(tooltip)
         label.setFrameStyle(QFrame.NoFrame)
+        self._bind_shared_scale_context_menu(label)
         return label
 
     def _handle_scene_mouse_moved(self, scene_position: object) -> None:
@@ -1041,13 +1176,16 @@ class TrendPlotWidget(QWidget):
         self._cursor_line.show()
         self._cursor_label.setText(f"Cursor: {_format_timestamp(cursor_x)}")
         self._cursor_label.show()
-        self.cursorStatsChanged.emit(self._build_cursor_stats(cursor_x))
+        cursor_stats = self._build_cursor_stats(cursor_x)
+        self._update_floating_legend(cursor_stats)
+        self.cursorStatsChanged.emit(cursor_stats)
 
     def _clear_cursor_state(self) -> None:
         self._current_cursor_x = None
         self._cursor_line.hide()
         self._cursor_label.clear()
         self._cursor_label.hide()
+        self._hide_floating_legend()
         self.cursorStatsChanged.emit(None)
 
     def _set_visible_range_text(self, x_min: float, x_max: float) -> None:
@@ -1131,9 +1269,183 @@ class TrendPlotWidget(QWidget):
         )
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
-        if watched is self._plot_widget.viewport() and event.type() == QEvent.Leave:
-            self._clear_cursor_state()
+        if watched is self._plot_widget.viewport():
+            if event.type() == QEvent.Leave:
+                self._clear_cursor_state()
+            elif event.type() == QEvent.ContextMenu:
+                global_position = (
+                    event.globalPos()
+                    if hasattr(event, "globalPos")
+                    else self._plot_widget.viewport().mapToGlobal(event.pos())
+                )
+                self._build_plot_context_menu().exec(global_position)
+                return True
         return super().eventFilter(watched, event)
+
+    def _build_plot_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        floating_legend_action = menu.addAction("Floating legend")
+        floating_legend_action.setCheckable(True)
+        floating_legend_action.setChecked(self._floating_legend_enabled)
+        floating_legend_action.toggled.connect(
+            lambda checked: self._set_floating_legend_enabled(checked, emit_state_change=True)
+        )
+
+        cursor_data_action = menu.addAction("Show data at cursor time")
+        cursor_data_action.setCheckable(True)
+        cursor_data_action.setChecked(self._floating_legend_show_cursor_data)
+        cursor_data_action.toggled.connect(
+            lambda checked: self._set_floating_legend_show_cursor_data(
+                checked,
+                emit_state_change=True,
+            )
+        )
+        return menu
+
+    def _bind_shared_scale_context_menu(self, widget: QWidget) -> None:
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda position, source=widget: self._show_shared_scale_context_menu(
+                source.mapToGlobal(position)
+            )
+        )
+
+    def _show_shared_scale_context_menu(self, global_position) -> None:
+        self._build_shared_scale_context_menu().exec(global_position)
+
+    def _build_shared_scale_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        for label, decimal_places in (
+            ("Auto", None),
+            ("0", 0),
+            ("1", 1),
+            ("2", 2),
+            ("3", 3),
+            ("4", 4),
+            ("5", 5),
+            ("6", 6),
+        ):
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(self._shared_scale_decimal_places == decimal_places)
+            action.triggered.connect(
+                lambda _checked=False, places=decimal_places: self._set_shared_scale_decimal_places(
+                    places,
+                    emit_state_change=True,
+                )
+            )
+        return menu
+
+    def _set_shared_scale_decimal_places(
+        self,
+        decimal_places: int | None,
+        *,
+        emit_state_change: bool,
+    ) -> None:
+        normalized_places = _coerce_scale_decimal_places(decimal_places)
+        if normalized_places == self._shared_scale_decimal_places:
+            return
+        self._shared_scale_decimal_places = normalized_places
+        self._set_shared_scale_labels(self._prepared_series)
+        if emit_state_change:
+            self._schedule_time_selection_state_changed()
+
+    def _set_floating_legend_enabled(self, enabled: bool, *, emit_state_change: bool) -> None:
+        normalized_enabled = bool(enabled)
+        if normalized_enabled == self._floating_legend_enabled:
+            if normalized_enabled:
+                self._refresh_floating_legend_from_current_cursor()
+            return
+        self._floating_legend_enabled = normalized_enabled
+        self._refresh_floating_legend_from_current_cursor()
+        if emit_state_change:
+            self._schedule_time_selection_state_changed()
+
+    def _set_floating_legend_show_cursor_data(
+        self,
+        enabled: bool,
+        *,
+        emit_state_change: bool,
+    ) -> None:
+        normalized_enabled = bool(enabled)
+        if normalized_enabled == self._floating_legend_show_cursor_data:
+            if self._floating_legend_enabled:
+                self._refresh_floating_legend_from_current_cursor()
+            return
+        self._floating_legend_show_cursor_data = normalized_enabled
+        if normalized_enabled:
+            self._floating_legend_enabled = True
+        self._refresh_floating_legend_from_current_cursor()
+        if emit_state_change:
+            self._schedule_time_selection_state_changed()
+
+    def _refresh_floating_legend_from_current_cursor(self) -> None:
+        if self._current_cursor_x is None:
+            self._hide_floating_legend()
+            return
+        self._update_floating_legend(self._build_cursor_stats(self._current_cursor_x))
+
+    def _update_floating_legend(self, cursor_stats: TrendCursorStats) -> None:
+        if not self._floating_legend_enabled or not self._prepared_series:
+            self._hide_floating_legend()
+            return
+
+        stats_by_tag = {
+            stats.tag_name: stats
+            for stats in cursor_stats.series_stats
+        }
+        lines: list[str] = []
+        active_highlighted_tags = self._active_highlighted_tag_names()
+        highlight_is_active = bool(active_highlighted_tags)
+        for prepared in self._prepared_series:
+            tag_name = prepared.plotted.series.tag_name
+            color_css = _qcolor_to_css(
+                _series_qcolor(
+                    prepared.color,
+                    dimmed=highlight_is_active and tag_name not in active_highlighted_tags,
+                )
+            )
+            label_text = html.escape(prepared.display_label)
+            if self._floating_legend_show_cursor_data:
+                value_text = _format_floating_legend_value(stats_by_tag.get(tag_name))
+                lines.append(
+                    f"<span style='color:{color_css};'><b>{label_text}</b>: {html.escape(value_text)}</span>"
+                )
+            else:
+                lines.append(
+                    f"<span style='color:{color_css};'><b>{label_text}</b></span>"
+                )
+
+        if not lines:
+            self._hide_floating_legend()
+            return
+
+        self._floating_legend_html = (
+            "<div style='font-size:11px; line-height:1.35;'>"
+            + "<br/>".join(lines)
+            + "</div>"
+        )
+        self._floating_legend_item.setHtml(self._floating_legend_html)
+        self._floating_legend_item.setAnchor(
+            (1.0, 0.0)
+            if self._should_anchor_floating_legend_right(cursor_stats.cursor_timestamp)
+            else (0.0, 0.0)
+        )
+        self._floating_legend_item.setPos(
+            cursor_stats.cursor_timestamp,
+            DISPLAY_Y_MAX - 2.0,
+        )
+        self._floating_legend_item.show()
+
+    def _hide_floating_legend(self) -> None:
+        self._floating_legend_html = ""
+        self._floating_legend_item.hide()
+
+    def _should_anchor_floating_legend_right(self, cursor_x: float) -> bool:
+        if self._current_visible_range is None:
+            return False
+        x_min, x_max = self._current_visible_range
+        return cursor_x >= (x_min + x_max) / 2.0
 
 
 def _build_summary_text(
@@ -1218,6 +1530,7 @@ def _configure_scale_grid(layout: QGridLayout, column_widths: list[int]) -> None
 def _shared_scale_column_widths(
     prepared_series: list[_PreparedTrendPlotSeries],
     font_metrics,
+    decimal_places: int | None,
 ) -> list[int]:
     column_count = _shared_scale_column_count(len(prepared_series))
     widths: list[int] = [0] * column_count
@@ -1226,9 +1539,9 @@ def _shared_scale_column_widths(
         column_index = index // SCALE_PANEL_TAGS_PER_COLUMN
         midpoint = (prepared.display_low_range + prepared.display_high_range) / 2.0
         column_values = (
-            _format_scale_value(prepared.display_high_range),
-            _format_scale_value(midpoint),
-            _format_scale_value(prepared.display_low_range),
+            _format_scale_value(prepared.display_high_range, decimal_places),
+            _format_scale_value(midpoint, decimal_places),
+            _format_scale_value(prepared.display_low_range, decimal_places),
         )
         widest_value = max(font_metrics.horizontalAdvance(text) for text in column_values)
         widths[column_index] = max(widths[column_index], widest_value + SCALE_PANEL_COLUMN_PADDING)
@@ -1287,12 +1600,40 @@ def _format_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _format_scale_value(value: float) -> str:
+def _format_scale_value(value: float, decimal_places: int | None = None) -> str:
+    if decimal_places is not None:
+        return f"{value:,.{decimal_places}f}"
     if abs(value) >= 100:
         return f"{value:,.2f}"
     if abs(value) >= 1:
         return f"{value:,.3f}"
     return f"{value:,.4f}"
+
+
+def _format_floating_legend_value(cursor_stats: TrendCursorSeriesStats | None) -> str:
+    if cursor_stats is None:
+        return "-"
+    for value in (
+        cursor_stats.interpolated_value,
+        cursor_stats.cursor_value,
+        cursor_stats.previous_value,
+        cursor_stats.next_value,
+    ):
+        if value is not None:
+            return _format_scale_value(value)
+    return "-"
+
+
+def _coerce_scale_decimal_places(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        decimal_places = int(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= decimal_places <= 6:
+        return decimal_places
+    return None
 
 
 def _visible_index_bounds(
@@ -1302,6 +1643,16 @@ def _visible_index_bounds(
 ) -> tuple[int, int]:
     start_index = max(0, int(np.searchsorted(x_values, x_min, side="left")) - 1)
     end_index = min(x_values.size, int(np.searchsorted(x_values, x_max, side="right")) + 1)
+    return start_index, end_index
+
+
+def _visible_stats_index_bounds(
+    x_values: np.ndarray,
+    x_min: float,
+    x_max: float,
+) -> tuple[int, int]:
+    start_index = int(np.searchsorted(x_values, x_min, side="left"))
+    end_index = int(np.searchsorted(x_values, x_max, side="right"))
     return start_index, end_index
 
 

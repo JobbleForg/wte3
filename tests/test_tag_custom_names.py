@@ -17,6 +17,8 @@ from wte_trend_viewer.ui.main_window import (
 )
 from wte_trend_viewer.ui.widgets.hierarchy_tree import SearchableHierarchyTree
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
+    TrendCursorSeriesStats,
+    TrendCursorStats,
     TrendPlotSeries,
     TrendVisibleSeriesStats,
 )
@@ -192,3 +194,49 @@ def test_bottom_tabs_are_legend_analytics_settings(qapp, tmp_path) -> None:
         "Analytics",
         "Settings",
     ]
+
+
+def test_analytics_cursor_value_prefers_cursor_time_value(qapp, tmp_path) -> None:
+    window = TrendViewerMainWindow(
+        session_store=SessionStore(tmp_path),
+        restore_last_session=False,
+    )
+    tag_name = "Process Data/TAG001"
+    window._current_visible_stats = [
+        TrendVisibleSeriesStats(
+            tag_name=tag_name,
+            sheet_name="Process Data",
+            color="#6CB6FF",
+            sample_count=3,
+            latest_value=6.2,
+            minimum_value=5.0,
+            maximum_value=6.2,
+            average_value=5.6,
+        )
+    ]
+    window._current_cursor_stats = TrendCursorStats(
+        cursor_timestamp=datetime(2026, 1, 1, 0, 6, 0).timestamp(),
+        series_stats=(
+            TrendCursorSeriesStats(
+                tag_name=tag_name,
+                sheet_name="Process Data",
+                color="#6CB6FF",
+                sample_timestamp=datetime(2026, 1, 1, 0, 5, 0).timestamp(),
+                cursor_value=7.918,
+                interpolated_value=5.255,
+                interpolation_mode="linear",
+                interpolation_start_timestamp=datetime(2026, 1, 1, 0, 5, 0).timestamp(),
+                interpolation_end_timestamp=datetime(2026, 1, 1, 0, 10, 0).timestamp(),
+                previous_timestamp=datetime(2026, 1, 1, 0, 5, 0).timestamp(),
+                previous_value=5.2,
+                next_timestamp=datetime(2026, 1, 1, 0, 10, 0).timestamp(),
+                next_value=5.3,
+            ),
+        ),
+    )
+
+    window._update_analytics_table()
+
+    assert window._analytics_table is not None
+    assert window._analytics_table.item(0, 1).text() == "5.255"
+    assert "Interpolation: linear" in window._analytics_table.item(0, 1).toolTip()

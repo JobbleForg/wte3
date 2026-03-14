@@ -8,6 +8,7 @@ import pytest
 
 from wte_trend_viewer.data_manager import TrendSeriesData, TrendSheetData
 from wte_trend_viewer.ui.widgets.trend_plot_widget import (
+    DISPLAY_Y_MAX,
     PLOT_COLORS,
     TrendPlotSeries,
     TrendVisibleSeriesStats,
@@ -24,13 +25,17 @@ def _make_plot_series() -> TrendPlotSeries:
 
 
 def _make_named_plot_series(tag_name: str, values: list[float]) -> TrendPlotSeries:
+    return _make_named_plot_series_with_minutes(tag_name, [0, 5, 10], values)
+
+
+def _make_named_plot_series_with_minutes(
+    tag_name: str,
+    minutes: list[int],
+    values: list[float],
+) -> TrendPlotSeries:
     timestamps = pl.Series(
         "Timestamp",
-        [
-            datetime(2026, 1, 1, 0, 0, 0),
-            datetime(2026, 1, 1, 0, 5, 0),
-            datetime(2026, 1, 1, 0, 10, 0),
-        ],
+        [datetime(2026, 1, 1, 0, minute, 0) for minute in minutes],
     )
     series = TrendSeriesData(
         tag_name=tag_name,
@@ -89,6 +94,126 @@ def test_cursor_label_is_in_navigation_row(qapp) -> None:
 
     assert widget._cursor_label.parent() is widget._visible_range_label.parent()
     assert widget._cursor_label.parent() is not widget
+
+
+def test_time_controls_can_collapse_and_roundtrip_state(qapp) -> None:
+    widget = TrendPlotWidget()
+
+    assert widget._navigation_controls_container.isHidden() is False
+    assert widget.time_selection_state()["time_controls_collapsed"] is False
+
+
+def test_plot_context_menu_reflects_floating_legend_state(qapp) -> None:
+    widget = TrendPlotWidget()
+
+    menu = widget._build_plot_context_menu()
+    actions = menu.actions()
+
+    assert [action.text() for action in actions] == [
+        "Floating legend",
+        "Show data at cursor time",
+    ]
+    assert actions[0].isCheckable() is True
+    assert actions[0].isChecked() is False
+    assert actions[1].isCheckable() is True
+    assert actions[1].isChecked() is False
+
+
+def test_shared_scale_context_menu_reflects_decimal_setting(qapp) -> None:
+    widget = TrendPlotWidget()
+
+    menu = widget._build_shared_scale_context_menu()
+    actions = menu.actions()
+
+    assert [action.text() for action in actions] == ["Auto", "0", "1", "2", "3", "4", "5", "6"]
+    assert actions[0].isChecked() is True
+
+    widget._set_shared_scale_decimal_places(2, emit_state_change=False)
+    menu = widget._build_shared_scale_context_menu()
+    actions = menu.actions()
+
+    assert actions[0].isChecked() is False
+    assert actions[3].text() == "2"
+    assert actions[3].isChecked() is True
+
+
+def test_floating_legend_shows_cursor_time_values(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted_series = [
+        _make_named_plot_series("TagA", [10.0, 15.0, 13.0]),
+        _make_named_plot_series("TagB", [4.0, 5.0, 6.0]),
+    ]
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=plotted_series)
+
+    widget._set_floating_legend_enabled(True, emit_state_change=False)
+    widget._set_floating_legend_show_cursor_data(True, emit_state_change=False)
+    widget._set_cursor_position(datetime(2026, 1, 1, 0, 6, 0).timestamp())
+
+    assert widget._floating_legend_item.isVisible() is True
+    assert "TagA" in widget._floating_legend_html
+    assert "TagB" in widget._floating_legend_html
+    assert "14.600" in widget._floating_legend_html
+    assert "5.200" in widget._floating_legend_html
+    assert widget._floating_legend_item.pos().y() == pytest.approx(DISPLAY_Y_MAX - 2.0)
+    assert widget.time_selection_state()["floating_legend_enabled"] is True
+    assert widget.time_selection_state()["floating_legend_show_cursor_data"] is True
+
+    widget._toggle_time_controls_collapsed()
+
+    assert widget._navigation_controls_container.isHidden() is True
+    assert widget.time_selection_state()["time_controls_collapsed"] is True
+
+    widget.set_time_selection_state({"time_controls_collapsed": False})
+
+    assert widget._navigation_controls_container.isHidden() is False
+    assert widget.time_selection_state()["time_controls_collapsed"] is False
+
+
+def test_shared_scale_decimal_places_updates_labels_and_roundtrips_state(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted = _make_plot_series()
+    widget.plot_series_group(
+        workbook_name="Workbook",
+        plotted_series=[plotted],
+        display_ranges_by_tag={"Pressure": (10.0, 15.0)},
+    )
+
+    assert widget._shared_scale_top_layout.itemAtPosition(0, 0).widget().text() == "15.000"
+    assert widget._shared_scale_mid_layout.itemAtPosition(0, 0).widget().text() == "12.500"
+    assert widget._shared_scale_bottom_layout.itemAtPosition(0, 0).widget().text() == "10.000"
+
+    widget._set_shared_scale_decimal_places(1, emit_state_change=False)
+
+    assert widget._shared_scale_top_layout.itemAtPosition(0, 0).widget().text() == "15.0"
+    assert widget._shared_scale_mid_layout.itemAtPosition(0, 0).widget().text() == "12.5"
+    assert widget._shared_scale_bottom_layout.itemAtPosition(0, 0).widget().text() == "10.0"
+    assert widget.time_selection_state()["shared_scale_decimal_places"] == 1
+
+    widget.set_time_selection_state({"shared_scale_decimal_places": 4})
+
+    assert widget._shared_scale_top_layout.itemAtPosition(0, 0).widget().text() == "15.0000"
+    assert widget._shared_scale_mid_layout.itemAtPosition(0, 0).widget().text() == "12.5000"
+    assert widget._shared_scale_bottom_layout.itemAtPosition(0, 0).widget().text() == "10.0000"
+    assert widget.time_selection_state()["shared_scale_decimal_places"] == 4
+
+
+def test_visible_stats_ignore_padded_draw_samples(qapp) -> None:
+    widget = TrendPlotWidget()
+    plotted = _make_named_plot_series_with_minutes("Pressure", [0, 5, 10, 15], [100.0, 1.0, 2.0, 3.0])
+    captured_stats: list[list[TrendVisibleSeriesStats]] = []
+    widget.visibleStatsChanged.connect(lambda stats: captured_stats.append(list(stats)))
+    widget.plot_series_group(workbook_name="Workbook", plotted_series=[plotted])
+
+    start = datetime(2026, 1, 1, 0, 5, 0).timestamp()
+    end = datetime(2026, 1, 1, 0, 15, 0).timestamp()
+    widget._set_visible_range(start, end, preserved_y_range=widget.current_y_range())
+
+    stats = captured_stats[-1][0]
+    assert stats.sample_count == 3
+    assert stats.latest_value == 3.0
+    assert stats.minimum_value == 1.0
+    assert stats.maximum_value == 3.0
+    assert stats.average_value == pytest.approx(2.0)
 
 
 def test_plot_color_palette_is_large_and_unique() -> None:

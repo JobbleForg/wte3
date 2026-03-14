@@ -31,6 +31,7 @@ Implemented and working on `main`:
 - hierarchy labels now show custom name plus unit
 - imported tag list now shows custom name, original name, and unit
 - legend, analytics, and plot title/surface labels now use custom display labels instead of raw tag paths
+- detached pop-out trend windows, so multiple trend windows can stay open at the same time
 
 Reference artifacts already saved in the repo:
 - `artifacts/app-running-main.png`
@@ -45,7 +46,7 @@ Automated checks already passing on `main`:
 - `.\.venv\Scripts\python.exe -m pytest`
 
 Most recent known passing test count:
-- `38 passed`
+- `51 passed`
 
 Manual testing status:
 - desktop testing looks good
@@ -88,6 +89,16 @@ Only if needed after manual QA:
 - refine the compact shared-scale panel spacing and typography
 - tune imported-tag display formatting if long custom names wrap poorly
 - add export behavior that uses the same custom display labels consistently
+
+### 4. Saved feature ideas
+
+Keep these on the backlog for later implementation:
+- multi-cursor comparison
+  - two cursors with delta time and delta value between them
+- derived tags
+  - formulas like difference, ratio, rolling average, and rate-of-change
+- snapshot/export of current view
+  - export exactly the visible trend view as image and/or visible-window data
 
 ## Suggested next starting point
 
