@@ -12,7 +12,7 @@ Its core job is:
 4. Plot one or many tags in a shared time window.
 5. Preserve the working state between launches.
 
-The current product direction is intentionally operator-oriented rather than spreadsheet-oriented: the UI is built around trend inspection, grouping, naming, units, cursor reading, and session continuity.
+The current product direction is intentionally operator-oriented rather than spreadsheet-oriented: the UI is built around trend inspection, grouping, naming, units, cursor reading, detached comparison windows, and session continuity.
 
 ## Stack And Why It Exists
 
@@ -164,9 +164,10 @@ flowchart LR
 - `TrendPlotWidget`
   - actual plotting engine
   - shared Y display normalization
-  - time-window controls
+  - collapsible time-window and pan controls
   - cursor line
-  - floating legend
+  - configurable floating legend
+  - shared-scale decimal precision context menu
   - pop-out-compatible state capture
 
 ### Bottom tabs
@@ -199,6 +200,15 @@ It receives a snapshot of:
 
 This is not a separate data model. It is a secondary UI projection of the same current selection at the moment of pop-out.
 
+Detached windows also have their own collapsible details section containing:
+
+- `Legend`
+  - current tag label, unit, range, and highlight state
+- `Analytics`
+  - live cursor and visible-window stats from that detached plot
+- `Settings`
+  - the currently available time presets
+
 ## Plotting And Interaction Model
 
 Primary file: [trend_plot_widget.py](/C:/Users/jakob/GIT/wte3/src/wte_trend_viewer/ui/widgets/trend_plot_widget.py)
@@ -214,6 +224,8 @@ This is the most important technical file in the program.
 - compute visible-window stats
 - compute cursor stats
 - manage pan fraction and explicit time-window controls
+- manage floating-legend display state and placement
+- manage shared-scale display precision
 - persist its internal UI state into session snapshots
 
 ### Internal data types
@@ -275,6 +287,26 @@ Cursor values are built from:
 
 The floating legend and analytics cursor column both now prefer the same cursor-time value logic, which avoids a common bug where different UI surfaces disagree about what "cursor value" means.
 
+The floating legend is explicitly operator-controlled from a plot context menu:
+
+- `Floating legend`
+  - show or hide the legend overlay
+- `Show data at cursor time`
+  - include live per-tag values in the floating legend
+- `Follow on Y axis`
+  - make the legend track vertically with the cursor instead of staying top-anchored
+
+When top-anchored, the legend flips left/right around the cursor depending on which half of the plot the cursor is in. When Y-follow is enabled, it still keeps a fixed pixel offset below the mouse cursor rather than covering the inspected point.
+
+### Shared-scale panel behavior
+
+The shared-scale panel is not just passive text. It has its own display rules:
+
+- tags are packed into vertical stacks to conserve width
+- the panel supports configurable decimal precision
+- precision is changed from a right-click context menu in the scale area
+- those precision settings are persisted with the plot/session state
+
 ### Visible-window stats
 
 The curve renderer uses padded samples just outside the visible window for visual continuity.
@@ -310,6 +342,20 @@ This is a pragmatic architecture choice:
 - no database required
 
 In [ui/main_window.py](/C:/Users/jakob/GIT/wte3/src/wte_trend_viewer/ui/main_window.py), `_capture_session()` and `_apply_session()` act as the serialization/deserialization boundary between live widgets and JSON state.
+
+That persisted state includes more than just workbook and hierarchy data. It also carries operator-facing trend configuration such as:
+
+- selected preview tag set
+- display ranges keyed by selected tag set
+- tag colors
+- highlighted tags
+- custom names
+- assigned units
+- time presets
+- active time window
+- collapsed/expanded time-control state
+- floating-legend settings
+- shared-scale decimal precision
 
 The app also stores last-workbook information in a resilient way:
 
@@ -435,7 +481,8 @@ Coverage areas include:
 - legend color/highlight behavior
 - session restore
 - detached trend windows
-- plot widget cursor, interpolation, scaling, and context menus
+- plot widget cursor, interpolation, scaling, floating legend, and context menus
+- shared-scale precision and collapsible plot controls
 
 This is a strong sign that the codebase is becoming refactor-friendly. The most brittle part of any Qt application is usually widget behavior hidden behind event handlers; here, much of that behavior is already exercised directly.
 
