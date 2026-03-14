@@ -106,3 +106,4 @@ def test_tag_colors_persist_in_session(qapp, tmp_path) -> None:
     restored_window._apply_session(session)
 
     assert restored_window._stored_color_for_tag("TagA") == "#F28F3B"
+

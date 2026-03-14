@@ -167,3 +167,4 @@ def test_detached_trend_window_highlight_checkbox_updates_plot(qapp, tmp_path) -
     qapp.processEvents()
 
     assert detached_window._trend_plot_widget._active_highlighted_tag_names() == {"TagA"}
+

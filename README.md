@@ -90,6 +90,6 @@ python -m pytest
 
 ## Notes
 
-- The sample workbook used during development is `sample-data.xlsx`.
+- No workbook data is included in the repository.
 - Sessions are restored automatically between launches.
 - On WSL, if the app does not open, check that GUI forwarding is available.

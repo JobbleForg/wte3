@@ -240,3 +240,4 @@ def test_analytics_cursor_value_prefers_cursor_time_value(qapp, tmp_path) -> Non
     assert window._analytics_table is not None
     assert window._analytics_table.item(0, 1).text() == "5.255"
     assert "Interpolation: linear" in window._analytics_table.item(0, 1).toolTip()
+

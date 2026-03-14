@@ -98,3 +98,4 @@ def test_highlighted_tags_persist_in_session(qapp, tmp_path) -> None:
     restored_window._apply_session(session)
 
     assert restored_window._stored_highlighted_tag_names() == ["TagA"]
+

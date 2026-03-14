@@ -337,7 +337,7 @@ That means:
 
 This avoids a classic bug where renaming a visible item accidentally changes the application key used for lookup, plotting, or persistence.
 
-Units are normalized without brackets on input, then displayed everywhere as `[UNIT]`. Superscript formatting such as `m^3/hr -> m³/hr` is applied centrally in `tag_units.py`, not at each widget call site.
+Units are normalized without brackets on input, then displayed everywhere as `[UNIT]`. Superscript formatting is applied centrally in `tag_units.py`, not at each widget call site.
 
 That centralization is a good choice because display normalization stays consistent across:
 
@@ -491,3 +491,4 @@ If the project grows substantially, the main future refactor would be to split `
 - tag presentation metadata
 
 Today, though, the codebase is still at a size where this centralized coordinator approach is efficient and understandable.
+

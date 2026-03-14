@@ -22,7 +22,7 @@ Implemented and working on `main`:
 - bottom-strip cursor and visible-range status
 - time-window controls with start / duration or start / end
 - saved time-duration presets
-- cursor inspection with `Prev Value`, `Cursor Value`, `Interp Value`, and `Next Value`
+- cursor inspection with `Cursor Value`
 - floating in-plot legend removed
 - left shared-scale label panel with compact stacked labels
 - reusable tag unit library
@@ -32,12 +32,7 @@ Implemented and working on `main`:
 - imported tag list now shows custom name, original name, and unit
 - legend, analytics, and plot title/surface labels now use custom display labels instead of raw tag paths
 - detached pop-out trend windows, so multiple trend windows can stay open at the same time
-
-Reference artifacts already saved in the repo:
-- `artifacts/app-running-main.png`
-- `artifacts/independent-y-axes-sketch.svg`
-- `artifacts/time-selection-placement-sketch.png`
-- `artifacts/time-selection-implemented.png`
+- floating legend controls with cursor-time data and optional Y follow
 
 ## Verification status
 
@@ -46,7 +41,7 @@ Automated checks already passing on `main`:
 - `.\.venv\Scripts\python.exe -m pytest`
 
 Most recent known passing test count:
-- `51 passed`
+- `65 passed`
 
 Manual testing status:
 - desktop testing looks good
@@ -58,7 +53,7 @@ Manual testing status:
 
 Check:
 1. Clone / install / run from the current `main`
-2. Open `sample-data.xlsx`
+2. Open a local workbook copy
 3. Load sheets and plot mixed-range tags
 4. Verify custom names and units on:
    - hierarchy list

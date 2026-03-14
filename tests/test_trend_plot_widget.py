@@ -360,3 +360,4 @@ def test_cursor_sample_indices_prefers_left_value_on_tie() -> None:
 
 def test_clamp_x_range_limits_window_to_data_extent() -> None:
     assert _clamp_x_range(-5.0, 5.0, 0.0, 20.0) == (0.0, 10.0)
+

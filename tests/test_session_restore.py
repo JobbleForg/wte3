@@ -107,3 +107,4 @@ def test_startup_restore_reports_when_workbook_cannot_be_reopened(qapp, tmp_path
     assert window.statusBar().currentMessage() == (
         "Restored last session layout, but the workbook could not be reopened automatically."
     )
+
